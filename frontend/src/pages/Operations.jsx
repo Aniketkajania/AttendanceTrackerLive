@@ -57,6 +57,7 @@ export default function Operations({ mode }) {
   const [date, setDate] = useState(today());
   const [rows, setRows] = useState([]);
   const [overview, setOverview] = useState(null);
+  const [activity, setActivity] = useState(null);
   const [form, setForm] = useState(initial[mode] || {});
   const [assignment, setAssignment] = useState({ employee_id: "", shift_id: "" });
   const [error, setError] = useState("");
@@ -78,7 +79,10 @@ export default function Operations({ mode }) {
         : mode === "reports"
         ? await api(`/api/operations/reports/daily?work_date=${date}${reportLocation ? `&location=${encodeURIComponent(reportLocation)}` : ""}`)
         : await api(`/api/operations/${mode}`);
-      if (mode === "overview") setOverview(data);
+      if (mode === "overview") {
+        setOverview(data);
+        setActivity(await api(`/api/operations/analytics/activity?work_date=${date}`));
+      }
       else if (mode === "reports") setReport(data);
       else setRows(data);
       if (mode === "areas") {
@@ -149,6 +153,20 @@ export default function Operations({ mode }) {
         <Kpi label="Visitors" value={overview?.visitors} icon={ContactRound} tone="bg-indigo-50 text-indigo-700 border-indigo-200" />
       </div>
       <Panel><div className="flex items-center gap-3"><CalendarDays className="text-blue-600" /><div><p className="font-semibold text-slate-800">Approved leave</p><p className="text-sm text-slate-500">{overview?.on_leave ?? "—"} employees on leave on the selected date</p></div></div></Panel>
+      <Panel>
+        <h2 className="mb-1 font-bold text-slate-800">Verified Attendance Activity</h2>
+        <p className="mb-4 text-xs text-slate-500">Accepted IN/OUT punches per hour, not total people or visitor footfall.</p>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+          {(activity?.hourly||[]).map(h=><div key={h.hour} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <div className="text-xs font-bold text-slate-500">{h.hour}:00</div>
+            <div className="mt-2 text-sm font-bold text-emerald-700">{h.arrivals} IN</div>
+            <div className="text-sm font-bold text-blue-700">{h.departures} OUT</div>
+          </div>)}
+        </div>
+        {!activity?.hourly?.length && <p className="py-3 text-sm text-slate-500">No verified punches on this date.</p>}
+        <h3 className="mt-5 mb-2 text-sm font-bold text-slate-700">Events by camera</h3>
+        <div className="flex flex-wrap gap-2">{(activity?.by_camera||[]).map((x,i)=><span key={i} className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">{x.camera_name||x.camera_id}: {x.events} {x.event_type}</span>)}</div>
+      </Panel>
       <p className="text-xs text-slate-500">Absent count is an estimate based on attendance records and approved leave. Shift schedules, holidays, and incomplete punches can affect this figure.</p>
     </> : mode === "reports" ? <>
       <Panel>
