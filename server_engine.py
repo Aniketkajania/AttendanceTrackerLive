@@ -1213,7 +1213,7 @@ def main():
                         f" | confirmed {confirmed_count} | avg detect-to-confirm {recognized['total_ms'] / confirmed_count:.0f}ms"
                         if confirmed_count else ""
                     )
-                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age | detect {detect_avg:.0f} ms | embed {embed_avg:.0f} ms ({tm.get('embeds', 0)} faces)")
+                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age | detect {detect_avg:.0f} ms | embed {embed_avg:.0f} ms ({tm.get('embeds', 0)} faces){confirmation_summary}")
                 if parts:
                     print("[STATS] " + "   ||   ".join(parts))
 
