@@ -32,6 +32,26 @@ class ShiftIn(BaseModel):
     grace_minutes: int = Field(default=15, ge=0, le=180)
 
 
+@router.get("/readiness")
+def readiness(request: Request):
+    """Read-only check for the optional operations schema.
+    This endpoint does not create tables or mutate attendance.
+    """
+    permitted(request, ("admin",))
+    needed = ["attendance_shifts", "employee_shifts", "attendance_areas",
+              "attendance_visitors", "attendance_camera_areas"]
+    rows = query("""
+        SELECT name FROM sys.tables
+        WHERE schema_id=SCHEMA_ID('dbo')
+          AND name IN ('attendance_shifts','employee_shifts','attendance_areas',
+                       'attendance_visitors','attendance_camera_areas')
+    """)
+    found = {r["name"] for r in rows}
+    missing = [name for name in needed if name not in found]
+    return {"ready":not missing, "missing_tables":missing,
+            "setup_script":"migrations/003_operations_setup_no_leaves.sql"}
+
+
 @router.get("/shifts")
 def shifts(request: Request):
     permitted(request, ("admin", "hr", "viewer"))
