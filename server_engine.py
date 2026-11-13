@@ -107,6 +107,8 @@ STATS_EVERY = 30                # seconds between [STATS] lines
 MAX_FRAME_AGE = float(os.getenv("MAX_FRAME_AGE", "1.25"))
 NEAR_RECOVERY_LIMIT = int(os.getenv("NEAR_RECOVERY_LIMIT", "1"))
 ENABLE_ENHANCEMENT = os.getenv("ENABLE_ENHANCEMENT", "0").strip() == "1"
+QUALITY_SCAN_INTERVAL = max(0.0, float(os.getenv("QUALITY_SCAN_INTERVAL", "0")))
+# Optional higher-resolution scan every N seconds per camera; 0 disables it.
 ORT_THREADS = int(os.getenv("ORT_THREADS", str(max(2, (os.cpu_count() or 4) // 2))))
 
 CAMERA_ROIS: dict = {
@@ -857,6 +859,7 @@ class InferenceWorker(threading.Thread):
         self.last_infer = {}
         self.prev_small = {}              # camera_id -> previous small grey frame (motion gate)
         self.last_full = {}               # camera_id -> time of the last full scan
+        self.last_quality = {}            # last expensive quality scan per camera
         self.stats = {}                   # camera_id -> {"seen", "scanned", "ms"}
         self.timing = {}
         self.running = True
@@ -952,7 +955,10 @@ class InferenceWorker(threading.Thread):
         else:
             det_frame = frame
         detect_start = time.perf_counter()
-        dets = self.finder.detect(det_frame, rois=CAMERA_ROIS.get(cid), tile_grid=TILE_GRID)
+        high_accuracy = QUALITY_SCAN_INTERVAL > 0 and now - self.last_quality.get(cid, 0) >= QUALITY_SCAN_INTERVAL
+        if high_accuracy:
+            self.last_quality[cid] = now
+        dets = self.finder.detect(det_frame, rois=CAMERA_ROIS.get(cid), tile_grid=TILE_GRID, high_accuracy=high_accuracy)
         tm = self.timing.setdefault(cid, {"detect_ms": 0.0, "embed_ms": 0.0, "embeds": 0, "detects": 0})
         tm["detect_ms"] += (time.perf_counter() - detect_start) * 1000
         tm["detects"] += 1
