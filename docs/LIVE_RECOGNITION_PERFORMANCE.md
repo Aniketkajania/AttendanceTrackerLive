@@ -33,3 +33,10 @@ Do not run a second live engine pointing at the production attendance database. 
 Capture [STATS] output for at least 2 minutes while people enter. Collect the camera count, CPU use, frame age, average scan time, detection-to-attendance latency and missed detections. If frame age is large, inspect network/decoder; if scan ms is high, inspect ONNX provider, CPU and resolution. Runtime acceleration depends on the actual Windows Server model and ONNX provider availability.
 
 The new changes are a measured optimization starting point, not a promise of immediate recognition on any hardware. The single inference worker is still a throughput limit under high camera counts; deeper per-camera inference scheduling may require a hardware benchmark, model replication or dedicated inference service.
+
+## Measuring recognition latency (latest test branch)
+A new `[RECOGNITION]` log line is printed once, when a track is confirmed. Its `detected_to_confirm` value starts at the **first detected face track**, not the moment a person enters the camera's view. `first_embedding_to_confirm` starts after the first successful embedding extraction. `attendance=queued` means the event was placed on the writer queue; it does **not** mean SQL has committed it. `attendance=not_queued_or_cooldown` commonly indicates the existing attendance cooldown, and may be expected.
+
+The normal `[STATS]` output adds the number of confirmed tracks and average detect-to-confirm duration for each camera during its reporting interval. The detector and embedding timings are also reported.
+
+For an honest end-to-end latency benchmark, record the moment a test participant first appears on camera separately, and measure through SQL commit with a safe test database. Run controlled trials with consenting participants: walking quickly, slowly, near and far, and looking away. Repeatedly verify correct identities and misses. Do not lower similarity thresholds to improve apparent latency.
