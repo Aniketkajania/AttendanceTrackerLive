@@ -1,9 +1,12 @@
 """CamSec-style operations. Requires migrations/001_camsec_operations.sql first.
 All mutation routes enforce authorization independently of the UI.
 """
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Literal, Optional
+import csv
+import io
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from db import query, execute
 
@@ -203,3 +206,110 @@ def overview(request: Request, work_date: date):
     return {"staff": staff[0]["total"], "present": attendance[0]["present"],
             "visitors": visitors[0]["total"], "on_leave": leaves[0]["total"],
             "absent_estimate": max(0, staff[0]["total"]-attendance[0]["present"]-leaves[0]["total"])}
+
+
+# ---------- consolidated attendance reporting ----------
+@router.get("/reports/daily")
+def daily_report(request: Request, work_date: date, location: Optional[str] = None):
+    """Staff roster + scheduled shift + approved leave + first/last punch.
+    Overnight shifts need dedicated cross-date reconciliation; mark them explicitly,
+    rather than asserting somebody was late based on clock time alone.
+    """
+    permitted(request, ("admin", "hr", "viewer"))
+    rows = query("""
+        SELECT u.employee_id, u.person_name, u.base_location,
+               s.shift_name, CONVERT(VARCHAR(5),s.start_time,108) AS shift_start,
+               CONVERT(VARCHAR(5),s.end_time,108) AS shift_end,
+               s.grace_minutes,
+               da.first_check_in,da.last_check_out,da.total_working_hours,
+               da.current_status, l.leave_type
+        FROM dbo.users u
+        LEFT JOIN dbo.employee_shifts es ON es.employee_id=u.employee_id
+        LEFT JOIN dbo.attendance_shifts s ON s.id=es.shift_id AND s.is_active=1
+        LEFT JOIN dbo.daily_attendance da ON da.employee_id=u.employee_id AND da.work_date=?
+        OUTER APPLY (
+            SELECT TOP 1 leave_type FROM dbo.attendance_leave_requests lr
+            WHERE lr.employee_id=u.employee_id AND lr.status='APPROVED'
+              AND lr.start_date<=? AND lr.end_date>=?
+            ORDER BY lr.id DESC
+        ) l
+        WHERE u.is_active=1 AND (? IS NULL OR u.base_location=?)
+        ORDER BY u.person_name
+    """, (work_date.isoformat(),work_date,work_date,location,location))
+    for row in rows:
+        if row["first_check_in"]:
+            if not row["shift_start"]:
+                status = "PRESENT_UNASSIGNED_SHIFT"
+            elif row["shift_end"] <= row["shift_start"]:
+                status = "PRESENT_OVERNIGHT_REVIEW"
+            else:
+                scheduled = datetime.combine(work_date, datetime.strptime(row["shift_start"], "%H:%M").time())
+                deadline = scheduled + timedelta(minutes=int(row["grace_minutes"] or 0))
+                punch = datetime.strptime(row["first_check_in"], "%Y-%m-%d %H:%M:%S")
+                status = "LATE" if punch > deadline else "ON_TIME"
+        elif row["leave_type"]:
+            status = "ON_LEAVE"
+        elif row["shift_start"]:
+            status = "ABSENT_ESTIMATE"
+        else:
+            status = "NO_PUNCH_UNASSIGNED_SHIFT"
+        row["attendance_status"] = status
+    return {"work_date":work_date.isoformat(), "location":location, "rows":rows,
+            "summary":{"staff":len(rows),
+                       "present":sum(bool(x["first_check_in"]) for x in rows),
+                       "late":sum(x["attendance_status"]=="LATE" for x in rows),
+                       "on_time":sum(x["attendance_status"]=="ON_TIME" for x in rows),
+                       "on_leave":sum(x["attendance_status"]=="ON_LEAVE" for x in rows),
+                       "absent_estimate":sum(x["attendance_status"]=="ABSENT_ESTIMATE" for x in rows),
+                       "requires_review":sum(x["attendance_status"] in ("PRESENT_OVERNIGHT_REVIEW","NO_PUNCH_UNASSIGNED_SHIFT","PRESENT_UNASSIGNED_SHIFT") for x in rows)}}
+
+
+@router.get("/reports/daily.csv")
+def daily_report_csv(request: Request, work_date: date, location: Optional[str] = None):
+    data = daily_report(request, work_date, location)
+    fields = ["employee_id","person_name","base_location","shift_name","shift_start",
+              "shift_end","first_check_in","last_check_out","total_working_hours",
+              "current_status","leave_type","attendance_status"]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for row in data["rows"]:
+        # Prefix spreadsheet formula-looking text to protect CSV exports opened in Excel.
+        safe = {k: ("'" + v if isinstance(v,str) and v.lstrip().startswith(("=","+","-","@")) else v)
+                for k,v in row.items()}
+        writer.writerow(safe)
+    buf.seek(0)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":f'attachment; filename="attendance_{work_date.isoformat()}.csv"'})
+
+
+# ---------- area assignment ----------
+class CameraAreaAssignment(BaseModel):
+    camera_id: str = Field(min_length=1,max_length=50)
+    area_id: int = Field(ge=1)
+
+
+@router.get("/camera-areas")
+def camera_areas(request: Request):
+    permitted(request, ("admin","hr","viewer"))
+    return query("""
+        SELECT c.camera_id,c.camera_name,c.location,c.camera_role,
+               ca.area_id,a.name AS area_name
+        FROM dbo.cameras c
+        LEFT JOIN dbo.attendance_camera_areas ca ON ca.camera_id=c.camera_id
+        LEFT JOIN dbo.attendance_areas a ON a.id=ca.area_id
+        WHERE c.is_active=1 ORDER BY c.location,c.camera_name
+    """)
+
+
+@router.post("/camera-areas")
+def assign_camera_area(item: CameraAreaAssignment, request: Request):
+    permitted(request, ("admin",))
+    if not exists("cameras","camera_id",item.camera_id) or not exists("attendance_areas","id",item.area_id):
+        raise HTTPException(404,"Camera or area not found")
+    execute("""
+        UPDATE dbo.attendance_camera_areas SET area_id=?,assigned_at=SYSDATETIME()
+        WHERE camera_id=?;
+        IF @@ROWCOUNT=0 INSERT INTO dbo.attendance_camera_areas(camera_id,area_id) VALUES (?,?)
+    """,(item.area_id,item.camera_id,item.camera_id,item.area_id))
+    return {"ok":True}
