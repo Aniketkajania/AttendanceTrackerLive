@@ -9,7 +9,6 @@ const headings = {
   reports: ["Daily Attendance Report", "Shift-aware roster, leave status and downloadable CSV"],
   visitors: ["Visitor Management", "Register arrivals and record departures"],
   shifts: ["Shift Management", "Manage work shifts and employee assignments"],
-  leaves: ["Leave Management", "Submit and review staff leave requests"],
   areas: ["Area Selection", "Define monitored zones for your office locations"],
 };
 const schemas = {
@@ -26,13 +25,6 @@ const schemas = {
     ["end_time", "End time", "time", true],
     ["grace_minutes", "Grace period (minutes)", "number"],
   ],
-  leaves: [
-    ["employee_id", "Employee ID", "text", true],
-    ["start_date", "From", "date", true],
-    ["end_date", "To", "date", true],
-    ["leave_type", "Leave type", "select", true, ["CASUAL", "SICK", "EARNED", "UNPAID", "OTHER"]],
-    ["reason", "Reason"],
-  ],
   areas: [
     ["name", "Area name", "text", true],
     ["location", "Location", "text", true],
@@ -42,13 +34,11 @@ const schemas = {
 const initial = {
   visitors: { full_name: "", organization: "", host_employee_id: "", purpose: "", location: "" },
   shifts: { shift_name: "", start_time: "09:00", end_time: "18:00", grace_minutes: 15 },
-  leaves: { employee_id: "", start_date: today(), end_date: today(), leave_type: "CASUAL", reason: "" },
   areas: { name: "", location: "", description: "" },
 };
 const columns = {
   visitors: [["full_name", "Visitor"], ["organization", "Organization"], ["location", "Location"], ["checked_in_at", "Arrived"], ["checked_out_at", "Departed"]],
   shifts: [["shift_name", "Shift"], ["start_time", "Start"], ["end_time", "End"], ["grace_minutes", "Grace (min)"]],
-  leaves: [["person_name", "Employee"], ["leave_type", "Type"], ["start_date", "From"], ["end_date", "To"], ["status", "Status"]],
   areas: [["name", "Area"], ["location", "Location"], ["description", "Description"]],
 };
 const titleCase = s => String(s || "").toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
@@ -126,7 +116,7 @@ export default function Operations({ mode }) {
     finally { setBusy(false); }
   };
 
-  const canCreate = role === "admin" || (role === "hr" && (mode === "leaves" || mode === "visitors"));
+  const canCreate = role === "admin" || (role === "hr" && mode === "visitors");
   const [heading, subtitle] = headings[mode] || ["Operations", ""];
 
   return <div className="space-y-6">
@@ -137,7 +127,7 @@ export default function Operations({ mode }) {
       </div>
       <div className="flex gap-2">
         <button className={btnSecondaryCls} onClick={load} disabled={busy}><RefreshCcw size={16} /> Refresh</button>
-        {canCreate && mode !== "overview" && <button className={btnCls} onClick={() => setShowCreate(!showCreate)}><Plus size={16} /> Add {mode === "leaves" ? "Request" : mode.slice(0, -1)}</button>}
+        {canCreate && mode !== "overview" && <button className={btnCls} onClick={() => setShowCreate(!showCreate)}><Plus size={16} /> Add {mode.slice(0, -1)}</button>}
       </div>
     </div>
     {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700">{error}</div>}
@@ -149,10 +139,9 @@ export default function Operations({ mode }) {
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <Kpi label="Active Staff" value={overview?.staff} icon={Users} tone="bg-blue-50 text-blue-700 border-blue-200" />
         <Kpi label="Present" value={overview?.present} icon={UserCheck} tone="bg-emerald-50 text-emerald-700 border-emerald-200" />
-        <Kpi label="Absent Estimate" value={overview?.absent_estimate} icon={UserX} tone="bg-rose-50 text-rose-700 border-rose-200" />
+        <Kpi label="Not Recorded" value={overview?.not_recorded} icon={UserX} tone="bg-rose-50 text-rose-700 border-rose-200" />
         <Kpi label="Visitors" value={overview?.visitors} icon={ContactRound} tone="bg-indigo-50 text-indigo-700 border-indigo-200" />
       </div>
-      <Panel><div className="flex items-center gap-3"><CalendarDays className="text-blue-600" /><div><p className="font-semibold text-slate-800">Approved leave</p><p className="text-sm text-slate-500">{overview?.on_leave ?? "—"} employees on leave on the selected date</p></div></div></Panel>
       <Panel>
         <h2 className="mb-1 font-bold text-slate-800">Verified Attendance Activity</h2>
         <p className="mb-4 text-xs text-slate-500">Accepted IN/OUT punches per hour, not total people or visitor footfall.</p>
@@ -167,7 +156,7 @@ export default function Operations({ mode }) {
         <h3 className="mt-5 mb-2 text-sm font-bold text-slate-700">Events by camera</h3>
         <div className="flex flex-wrap gap-2">{(activity?.by_camera||[]).map((x,i)=><span key={i} className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">{x.camera_name||x.camera_id}: {x.events} {x.event_type}</span>)}</div>
       </Panel>
-      <p className="text-xs text-slate-500">Absent count is an estimate based on attendance records and approved leave. Shift schedules, holidays, and incomplete punches can affect this figure.</p>
+      <p className="text-xs text-slate-500">Not recorded means no attendance entry exists for the selected date. It does not establish an absence; holidays, schedules and incomplete punches can affect this figure.</p>
     </> : mode === "reports" ? <>
       <Panel>
         <div className="flex flex-wrap items-end gap-3">
@@ -184,7 +173,7 @@ export default function Operations({ mode }) {
         <Kpi label="Staff" value={report?.summary?.staff} icon={Users}/>
         <Kpi label="Present" value={report?.summary?.present} icon={UserCheck}/>
         <Kpi label="Late" value={report?.summary?.late} icon={Clock3}/>
-        <Kpi label="On leave" value={report?.summary?.on_leave} icon={CalendarDays}/>
+        <Kpi label="Not recorded" value={report?.summary?.not_recorded} icon={CalendarDays}/>
       </div>
       <Panel className="overflow-x-auto">
         <table className="min-w-[900px] w-full text-sm text-left">
@@ -252,12 +241,6 @@ export default function Operations({ mode }) {
           </tr></thead>
           <tbody>{rows.map(r => <tr key={r.id} className="border-b border-slate-100 hover:bg-slate-50">
             {(columns[mode] || []).map(([key]) => <td key={key} className="px-3 py-3 text-slate-700">{r[key] == null ? "—" : String(r[key])}</td>)}
-            {mode === "leaves" && <td className="px-3 py-3">
-              {r.status === "PENDING" && role !== "viewer" && <div className="flex gap-2">
-                <button disabled={busy} className="text-xs font-bold text-emerald-700" onClick={() => act(`/api/operations/leaves/${r.id}/review`, {status:"APPROVED"})}>Approve</button>
-                <button disabled={busy} className="text-xs font-bold text-rose-700" onClick={() => act(`/api/operations/leaves/${r.id}/review`, {status:"REJECTED"})}>Reject</button>
-              </div>}
-            </td>}
             {mode === "visitors" && <td className="px-3 py-3">
               {!r.checked_out_at && role !== "viewer" && <button disabled={busy} className="text-xs font-bold text-blue-700" onClick={() => act(`/api/operations/visitors/${r.id}/checkout`)}>Check out</button>}
             </td>}
