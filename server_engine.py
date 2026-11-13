@@ -860,6 +860,7 @@ class InferenceWorker(threading.Thread):
         self.last_quality = {}            # last expensive quality scan per camera
         self.stats = {}                   # camera_id -> {"seen", "scanned", "ms"}
         self.timing = {}
+        self.recognition_stats = {}
         self.running = True
 
     # ---------- preview side ----------
@@ -1062,6 +1063,9 @@ class InferenceWorker(threading.Thread):
                 f"attendance={'queued' if queued else 'not_queued_or_cooldown'}",
                 flush=True,
             )
+            rec = self.recognition_stats.setdefault(cam_cfg["camera_id"], {"count": 0, "total_ms": 0.0})
+            rec["count"] += 1
+            rec["total_ms"] += detected_to_confirm_ms
             track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
         elif matched:
             track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
@@ -1190,6 +1194,8 @@ def main():
                 st = worker.pop_stats()
                 timing = worker.timing
                 worker.timing = {}
+                recognition_stats = worker.recognition_stats
+                worker.recognition_stats = {}
                 parts = []
                 for cid, s in list(stream_threads.items()):
                     fr = s.frames
@@ -1201,6 +1207,12 @@ def main():
                     tm = timing.get(cid, {})
                     detect_avg = tm.get("detect_ms", 0.0) / max(1, tm.get("detects", 0))
                     embed_avg = tm.get("embed_ms", 0.0) / max(1, tm.get("embeds", 0))
+                    recognized = recognition_stats.get(cid, {})
+                    confirmed_count = recognized.get("count", 0)
+                    confirmation_summary = (
+                        f" | confirmed {confirmed_count} | avg detect-to-confirm {recognized['total_ms'] / confirmed_count:.0f}ms"
+                        if confirmed_count else ""
+                    )
                     parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age | detect {detect_avg:.0f} ms | embed {embed_avg:.0f} ms ({tm.get('embeds', 0)} faces)")
                 if parts:
                     print("[STATS] " + "   ||   ".join(parts))
