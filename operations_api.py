@@ -154,6 +154,13 @@ def overview(request: Request, work_date: date):
 
 
 # ---------- consolidated attendance reporting ----------
+@router.get("/report-locations")
+def report_locations(request: Request):
+    permitted(request, ("admin", "hr", "viewer"))
+    rows = query("SELECT DISTINCT base_location FROM dbo.users WHERE is_active=1 AND base_location IS NOT NULL ORDER BY base_location")
+    return [x["base_location"] for x in rows]
+
+
 @router.get("/reports/daily")
 def daily_report(request: Request, work_date: date, location: Optional[str] = None):
     """Staff roster + scheduled shift + first/last punch.
