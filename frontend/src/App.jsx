@@ -114,7 +114,7 @@ export default function App() {
       <aside className="sticky top-0 hidden h-screen w-72 shrink-0 flex-col border-r border-slate-200 bg-white p-5 md:flex shadow-xs">
         
         {/* Gateway Distriparks Brand Logo Container */}
-        <div className="mb-6 rounded-xl border border-slate-200 bg-white p-3 shadow-xs">
+        <div className="mb-6 shrink-0 rounded-xl border border-slate-200 bg-white p-3 shadow-xs">
           <img
             src="/gateway-logo.png"
             alt="Gateway Distriparks"
@@ -128,7 +128,7 @@ export default function App() {
         </div>
 
         {/* Portal Status Tag */}
-        <div className="mb-6 flex items-center justify-between border-b border-slate-100 pb-4">
+        <div className="mb-6 flex shrink-0 items-center justify-between border-b border-slate-100 pb-4">
           <div className="text-[11px] font-bold tracking-wider text-slate-400 uppercase">
             Attendance Portal
           </div>
@@ -139,11 +139,11 @@ export default function App() {
         </div>
 
         {/* Navigation Items */}
-        <div className="mb-2 text-[11px] font-bold tracking-wider text-slate-400 uppercase">
+        <div className="mb-2 shrink-0 text-[11px] font-bold tracking-wider text-slate-400 uppercase">
           Menu
         </div>
 
-        <nav className="space-y-1">
+        <nav aria-label="Main navigation" className="min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain pr-1 pb-3">
           {nav.map(({ id, label, icon: Icon }) => {
             const isCurrent = active === id;
             return (
@@ -170,7 +170,7 @@ export default function App() {
         </nav>
 
         {/* User Card */}
-        <div className="mt-auto rounded-xl border border-slate-200 bg-slate-50/80 p-3.5">
+        <div className="mt-3 shrink-0 rounded-xl border border-slate-200 bg-slate-50/80 p-3.5">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-xs font-bold text-white shadow-xs">
               {userInitials}
