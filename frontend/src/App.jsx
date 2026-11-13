@@ -16,7 +16,7 @@ import RegisterEmployee from "./pages/RegisterEmployee";
 import Cameras from "./pages/Cameras";
 import Users from "./pages/Users";
 import Operations from "./pages/Operations";
-import { ClipboardList, Clock3, MapPinned, ContactRound, BarChart3 } from "lucide-react";
+import { Clock3, MapPinned, ContactRound, BarChart3 } from "lucide-react";
 
 // Sign the user out after this many minutes with no mouse / keyboard / touch activity. 0 = never.
 const IDLE_MINUTES = 15;
@@ -32,7 +32,6 @@ const NAV = [
   { id: "reports", label: "Daily Reports", icon: ScrollText, page: () => <Operations mode="reports" />, roles: ALL },
   { id: "visitors", label: "Visitors", icon: ContactRound, page: () => <Operations mode="visitors" />, roles: ["admin", "hr"] },
   { id: "shifts", label: "Shift Management", icon: Clock3, page: () => <Operations mode="shifts" />, roles: ALL },
-  { id: "leaves", label: "Leave Management", icon: ClipboardList, page: () => <Operations mode="leaves" />, roles: ["admin", "hr"] },
   { id: "areas", label: "Area Selection", icon: MapPinned, page: () => <Operations mode="areas" />, roles: ALL },
 ];
 
