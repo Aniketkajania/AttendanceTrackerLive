@@ -5,8 +5,8 @@ import { Users, UserCheck, UserX, ContactRound, CalendarDays, Plus, RefreshCcw }
 
 const today = () => new Date().toLocaleDateString("en-CA");
 const headings = {
-  overview: ["Attendance Analytics", "Live daily staff, visitor and leave statistics"],
-  reports: ["Daily Attendance Report", "Shift-aware roster, leave status and downloadable CSV"],
+  overview: ["Attendance Analytics", "Live daily staff and visitor statistics"],
+  reports: ["Daily Attendance Report", "Shift-aware roster, punch status and downloadable CSV"],
   visitors: ["Visitor Management", "Register arrivals and record departures"],
   shifts: ["Shift Management", "Manage work shifts and employee assignments"],
   areas: ["Area Selection", "Define monitored zones for your office locations"],
@@ -237,7 +237,7 @@ export default function Operations({ mode }) {
         <table className="w-full min-w-[650px] text-left text-sm">
           <thead><tr className="border-b border-slate-200 text-[11px] font-bold uppercase tracking-wide text-slate-500">
             {(columns[mode] || []).map(([key,label]) => <th key={key} className="px-3 py-3">{label}</th>)}
-            {(mode === "leaves" || mode === "visitors") && <th className="px-3 py-3">Actions</th>}
+            {mode === "visitors" && <th className="px-3 py-3">Actions</th>}
           </tr></thead>
           <tbody>{rows.map(r => <tr key={r.id} className="border-b border-slate-100 hover:bg-slate-50">
             {(columns[mode] || []).map(([key]) => <td key={key} className="px-3 py-3 text-slate-700">{r[key] == null ? "—" : String(r[key])}</td>)}
