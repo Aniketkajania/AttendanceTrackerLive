@@ -313,3 +313,27 @@ def assign_camera_area(item: CameraAreaAssignment, request: Request):
         IF @@ROWCOUNT=0 INSERT INTO dbo.attendance_camera_areas(camera_id,area_id) VALUES (?,?)
     """,(item.area_id,item.camera_id,item.camera_id,item.area_id))
     return {"ok":True}
+
+
+@router.get("/analytics/activity")
+def attendance_activity(request: Request, work_date: date):
+    """Verified punch activity, NOT anonymous people counting or camera footfall."""
+    permitted(request, ("admin","hr","viewer"))
+    hourly = query("""
+        SELECT SUBSTRING(event_timestamp,12,2) AS hour,
+               SUM(CASE WHEN event_type='IN' THEN 1 ELSE 0 END) AS arrivals,
+               SUM(CASE WHEN event_type='OUT' THEN 1 ELSE 0 END) AS departures
+        FROM dbo.attendance_logs WHERE work_date=?
+        GROUP BY SUBSTRING(event_timestamp,12,2)
+        ORDER BY hour
+    """,(work_date.isoformat(),))
+    by_camera = query("""
+        SELECT a.camera_id, c.camera_name, a.event_type, COUNT(*) AS events
+        FROM dbo.attendance_logs a
+        LEFT JOIN dbo.cameras c ON c.camera_id=a.camera_id
+        WHERE a.work_date=?
+        GROUP BY a.camera_id,c.camera_name,a.event_type
+        ORDER BY a.camera_id,a.event_type
+    """,(work_date.isoformat(),))
+    return {"work_date":work_date.isoformat(), "hourly":hourly, "by_camera":by_camera,
+            "metric":"verified_attendance_events", "is_people_count":False}
