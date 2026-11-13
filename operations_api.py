@@ -2,7 +2,7 @@
 All mutation routes enforce authorization independently of the UI.
 """
 from datetime import date, datetime, timedelta
-from typing import Literal, Optional
+from typing import Optional
 import csv
 import io
 from fastapi import APIRouter, HTTPException, Request
@@ -70,58 +70,6 @@ def assign_shift(item: ShiftAssignment, request: Request):
     execute("""UPDATE employee_shifts SET shift_id=? WHERE employee_id=?;
                IF @@ROWCOUNT=0 INSERT INTO employee_shifts(employee_id,shift_id) VALUES (?,?)""",
             (item.shift_id, item.employee_id, item.employee_id, item.shift_id))
-    return {"ok": True}
-
-
-class LeaveIn(BaseModel):
-    employee_id: str
-    start_date: date
-    end_date: date
-    leave_type: Literal["CASUAL", "SICK", "EARNED", "UNPAID", "OTHER"]
-    reason: str = Field(default="", max_length=1000)
-
-
-@router.get("/leaves")
-def leaves(request: Request, status: Optional[str] = None):
-    permitted(request, ("admin", "hr"))
-    if status and status not in ("PENDING", "APPROVED", "REJECTED"):
-        raise HTTPException(422, "Invalid status")
-    sql = """SELECT l.id,l.employee_id,u.person_name,CONVERT(VARCHAR(10),l.start_date,23) AS start_date,
-            CONVERT(VARCHAR(10),l.end_date,23) AS end_date,l.leave_type,l.reason,l.status,l.reviewed_by
-            FROM attendance_leave_requests l JOIN users u ON u.employee_id=l.employee_id"""
-    if status:
-        return query(sql+" WHERE l.status=? ORDER BY l.id DESC", (status,))
-    return query(sql+" ORDER BY l.id DESC")
-
-
-@router.post("/leaves", status_code=201)
-def create_leave(item: LeaveIn, request: Request):
-    permitted(request)
-    if item.end_date < item.start_date:
-        raise HTTPException(422, "End date cannot precede start date")
-    if not exists("users", "employee_id", item.employee_id):
-        raise HTTPException(404, "Employee not found")
-    overlap = query("""SELECT TOP 1 id FROM attendance_leave_requests WHERE employee_id=? AND status <> 'REJECTED'
-                     AND start_date<=? AND end_date>=?""", (item.employee_id, item.end_date, item.start_date))
-    if overlap:
-        raise HTTPException(409, "Overlapping leave request already exists")
-    execute("INSERT INTO attendance_leave_requests (employee_id,start_date,end_date,leave_type,reason) VALUES (?,?,?,?,?)",
-            (item.employee_id, item.start_date, item.end_date, item.leave_type, item.reason.strip()))
-    return {"ok": True}
-
-
-class ReviewIn(BaseModel):
-    status: Literal["APPROVED", "REJECTED"]
-
-
-@router.post("/leaves/{leave_id}/review")
-def review_leave(leave_id: int, item: ReviewIn, request: Request):
-    user = permitted(request, ("admin", "hr"))
-    changed = query("SELECT id FROM attendance_leave_requests WHERE id=? AND status='PENDING'", (leave_id,))
-    if not changed:
-        raise HTTPException(409, "Request not found or already reviewed")
-    execute("""UPDATE attendance_leave_requests SET status=?,reviewed_by=?,reviewed_at=SYSDATETIME()
-               WHERE id=? AND status='PENDING'""", (item.status, user["username"], leave_id))
     return {"ok": True}
 
 
@@ -200,18 +148,15 @@ def overview(request: Request, work_date: date):
     visitors = query("""SELECT COUNT(*) AS total FROM attendance_visitors
                         WHERE checked_in_at >= ? AND checked_in_at < DATEADD(day,1,?)""",
                      (work_date, work_date))
-    leaves = query("""SELECT COUNT(*) AS total FROM attendance_leave_requests
-                      WHERE status='APPROVED' AND start_date<=? AND end_date>=?""",
-                   (work_date, work_date))
     return {"staff": staff[0]["total"], "present": attendance[0]["present"],
-            "visitors": visitors[0]["total"], "on_leave": leaves[0]["total"],
-            "absent_estimate": max(0, staff[0]["total"]-attendance[0]["present"]-leaves[0]["total"])}
+            "visitors": visitors[0]["total"],
+            "not_recorded": max(0, staff[0]["total"]-attendance[0]["present"])}
 
 
 # ---------- consolidated attendance reporting ----------
 @router.get("/reports/daily")
 def daily_report(request: Request, work_date: date, location: Optional[str] = None):
-    """Staff roster + scheduled shift + approved leave + first/last punch.
+    """Staff roster + scheduled shift + first/last punch.
     Overnight shifts need dedicated cross-date reconciliation; mark them explicitly,
     rather than asserting somebody was late based on clock time alone.
     """
@@ -222,20 +167,14 @@ def daily_report(request: Request, work_date: date, location: Optional[str] = No
                CONVERT(VARCHAR(5),s.end_time,108) AS shift_end,
                s.grace_minutes,
                da.first_check_in,da.last_check_out,da.total_working_hours,
-               da.current_status, l.leave_type
+               da.current_status
         FROM dbo.users u
         LEFT JOIN dbo.employee_shifts es ON es.employee_id=u.employee_id
         LEFT JOIN dbo.attendance_shifts s ON s.id=es.shift_id AND s.is_active=1
         LEFT JOIN dbo.daily_attendance da ON da.employee_id=u.employee_id AND da.work_date=?
-        OUTER APPLY (
-            SELECT TOP 1 leave_type FROM dbo.attendance_leave_requests lr
-            WHERE lr.employee_id=u.employee_id AND lr.status='APPROVED'
-              AND lr.start_date<=? AND lr.end_date>=?
-            ORDER BY lr.id DESC
-        ) l
         WHERE u.is_active=1 AND (? IS NULL OR u.base_location=?)
         ORDER BY u.person_name
-    """, (work_date.isoformat(),work_date,work_date,location,location))
+    """, (work_date.isoformat(),location,location))
     for row in rows:
         if row["first_check_in"]:
             if not row["shift_start"]:
@@ -247,10 +186,8 @@ def daily_report(request: Request, work_date: date, location: Optional[str] = No
                 deadline = scheduled + timedelta(minutes=int(row["grace_minutes"] or 0))
                 punch = datetime.strptime(row["first_check_in"], "%Y-%m-%d %H:%M:%S")
                 status = "LATE" if punch > deadline else "ON_TIME"
-        elif row["leave_type"]:
-            status = "ON_LEAVE"
         elif row["shift_start"]:
-            status = "ABSENT_ESTIMATE"
+            status = "NO_PUNCH_SCHEDULED"
         else:
             status = "NO_PUNCH_UNASSIGNED_SHIFT"
         row["attendance_status"] = status
@@ -259,8 +196,7 @@ def daily_report(request: Request, work_date: date, location: Optional[str] = No
                        "present":sum(bool(x["first_check_in"]) for x in rows),
                        "late":sum(x["attendance_status"]=="LATE" for x in rows),
                        "on_time":sum(x["attendance_status"]=="ON_TIME" for x in rows),
-                       "on_leave":sum(x["attendance_status"]=="ON_LEAVE" for x in rows),
-                       "absent_estimate":sum(x["attendance_status"]=="ABSENT_ESTIMATE" for x in rows),
+                       "not_recorded":sum(not bool(x["first_check_in"]) for x in rows),
                        "requires_review":sum(x["attendance_status"] in ("PRESENT_OVERNIGHT_REVIEW","NO_PUNCH_UNASSIGNED_SHIFT","PRESENT_UNASSIGNED_SHIFT") for x in rows)}}
 
 
@@ -269,7 +205,7 @@ def daily_report_csv(request: Request, work_date: date, location: Optional[str] 
     data = daily_report(request, work_date, location)
     fields = ["employee_id","person_name","base_location","shift_name","shift_start",
               "shift_end","first_check_in","last_check_out","total_working_hours",
-              "current_status","leave_type","attendance_status"]
+              "current_status","attendance_status"]
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
