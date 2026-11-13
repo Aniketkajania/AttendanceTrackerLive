@@ -69,8 +69,8 @@ from face_pipeline import (
 )
 
 # Tracks survive a missed detection a little longer, because we now process ~8 frames/s, not 30.
-fp.TRACK_TTL = 0.5
-fp.TRACK_TTL_CONFIRMED = 0.5
+fp.TRACK_TTL = float(os.getenv("UNCONFIRMED_TRACK_TTL", "2.0"))
+fp.TRACK_TTL_CONFIRMED = float(os.getenv("CONFIRMED_TRACK_TTL", "2.5"))
 
 
 # =====================================================================
@@ -82,13 +82,13 @@ DETECTOR_PACK = os.getenv("DETECTOR_PACK", "buffalo_s")                         
 # ---- stream decoding ----
 STREAM_BACKEND = os.getenv("STREAM_BACKEND", "auto").strip().lower()     # auto | ffmpeg | opencv
 DECODE_FPS = float(os.getenv("DECODE_FPS", "8"))                         # frames/s handed to the engine
-STREAM_MAX_WIDTH = int(os.getenv("STREAM_MAX_WIDTH", "1920"))            # larger frames are downscaled by ffmpeg
+STREAM_MAX_WIDTH = int(os.getenv("STREAM_MAX_WIDTH", "1280"))            # larger frames are downscaled by ffmpeg
 FFMPEG_HWACCEL = os.getenv("FFMPEG_HWACCEL", "").strip()                 # "", auto, cuda, d3d11va, qsv
 STALL_SEC = 8.0                                                          # no frames for this long -> restart ffmpeg
 RECONNECT_DELAY = 3.0
 
 # ---- idle gating ----
-MOTION_GATE = os.getenv("MOTION_GATE", "1").strip() == "1"
+MOTION_GATE = os.getenv("MOTION_GATE", "0").strip() == "1"
 MOTION_SIZE = (320, 180)        # frame is shrunk to this for the motion check
 MOTION_PIX_DELTA = 18           # grey-level change that counts as "moved"
 MOTION_MIN_PIXELS = 30          # changed pixels (of 57,600) needed to wake the detector
@@ -98,12 +98,15 @@ BUSY_SEC = 1.5                  # keep scanning every frame this long after a fa
 # ---- engine ----
 USE_INTEL_GPU = False
 DET_SIZE = (640, 640)           # only used for model.prepare(); real detection sizes live in face_pipeline.py
-INFER_EVERY = 0.12              # min seconds between passes per camera
+INFER_EVERY = float(os.getenv("INFER_EVERY", "0.08"))
 OVERLAY_TTL = 2.5
 PREVIEW_MAX_WIDTH = 1280
 SHOW_PREVIEW = _SHOW_PREVIEW
 REVERIFY = 2.0                  # confirmed tracks are re-checked this often (seconds)
 STATS_EVERY = 30                # seconds between [STATS] lines
+MAX_FRAME_AGE = float(os.getenv("MAX_FRAME_AGE", "1.25"))
+NEAR_RECOVERY_LIMIT = int(os.getenv("NEAR_RECOVERY_LIMIT", "1"))
+ENABLE_ENHANCEMENT = os.getenv("ENABLE_ENHANCEMENT", "0").strip() == "1"
 ORT_THREADS = int(os.getenv("ORT_THREADS", str(max(2, (os.cpu_count() or 4) // 2))))
 
 CAMERA_ROIS: dict = {
@@ -881,12 +884,13 @@ class InferenceWorker(threading.Thread):
     def run(self):
         while self.running:
             did_work = False
-            for cid, stream in list(self.streams.items()):
+            streams = sorted(list(self.streams.items()), key=lambda item: self.last_infer.get(item[0], 0.0))
+            for cid, stream in streams:
                 now = time.time()
                 if now - self.last_infer.get(cid, 0.0) < INFER_EVERY:
                     continue
                 frame, fts = stream.get_latest_frame()
-                if frame is None or fts == self.last_frame_ts.get(cid):
+                if frame is None or fts == self.last_frame_ts.get(cid) or now - fts > MAX_FRAME_AGE:
                     continue
                 self.last_frame_ts[cid] = fts
                 self.last_infer[cid] = now
@@ -908,7 +912,7 @@ class InferenceWorker(threading.Thread):
                         print(f"[SLOW] {cid}: one scan took {dt:.2f}s")
                 did_work = True
             if not did_work:
-                time.sleep(0.01)
+                time.sleep(0.005)
 
     # ---------- motion gate ----------
     def _motion(self, cid, gray):
@@ -940,17 +944,22 @@ class InferenceWorker(threading.Thread):
         self.last_full[cid] = now
 
         # enhancement (LAB conversion) only when the scene really is dark / blown out / flat
-        mean, std = float(gray.mean()), float(gray.std())
-        det_frame = frame if (95 <= mean <= 165 and std >= 40) else enhance_for_detection(frame)
+        if ENABLE_ENHANCEMENT:
+            mean, std = float(gray.mean()), float(gray.std())
+            det_frame = frame if (95 <= mean <= 165 and std >= 40) else enhance_for_detection(frame)
+        else:
+            det_frame = frame
         dets = self.finder.detect(det_frame, rois=CAMERA_ROIS.get(cid), tile_grid=TILE_GRID)
 
         for track, det in tracker.update(dets, now):
             self._process(track, det, frame, cam_cfg, users, matrix, now)
 
         # faces we were following but the full pass missed: look right where they were
+        recovery_attempts = 0
         for t in tracker.tracks:
-            if t.matched_now:
+            if t.matched_now or recovery_attempts >= NEAR_RECOVERY_LIMIT:
                 continue
+            recovery_attempts += 1
             d = self.finder.detect_near(det_frame, t.display_box(now))
             if d is not None:
                 t.update(d["bbox"], now)
