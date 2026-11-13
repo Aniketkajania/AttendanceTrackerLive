@@ -858,6 +858,7 @@ class InferenceWorker(threading.Thread):
         self.prev_small = {}              # camera_id -> previous small grey frame (motion gate)
         self.last_full = {}               # camera_id -> time of the last full scan
         self.stats = {}                   # camera_id -> {"seen", "scanned", "ms"}
+        self.timing = {}
         self.running = True
 
     # ---------- preview side ----------
@@ -950,7 +951,11 @@ class InferenceWorker(threading.Thread):
             det_frame = frame if (95 <= mean <= 165 and std >= 40) else enhance_for_detection(frame)
         else:
             det_frame = frame
+        detect_start = time.perf_counter()
         dets = self.finder.detect(det_frame, rois=CAMERA_ROIS.get(cid), tile_grid=TILE_GRID)
+        tm = self.timing.setdefault(cid, {"detect_ms": 0.0, "embed_ms": 0.0, "embeds": 0, "detects": 0})
+        tm["detect_ms"] += (time.perf_counter() - detect_start) * 1000
+        tm["detects"] += 1
 
         for track, det in tracker.update(dets, now):
             self._process(track, det, frame, cam_cfg, users, matrix, now)
@@ -995,7 +1000,11 @@ class InferenceWorker(threading.Thread):
             track.label, track.color = "Unknown", (0, 0, 255)
             return
 
+        embed_start = time.perf_counter()
         emb = self.finder.embed(frame, det["kps"], det["bbox"], det["score"])
+        tm = self.timing.setdefault(cam_cfg["camera_id"], {"detect_ms": 0.0, "embed_ms": 0.0, "embeds": 0, "detects": 0})
+        tm["embed_ms"] += (time.perf_counter() - embed_start) * 1000
+        tm["embeds"] += 1
         track.embs.append((emb, q))
         track.good_samples += 1
         track.last_verify = now
@@ -1160,6 +1169,8 @@ def main():
                 dt = now_epoch - last_stats
                 last_stats = now_epoch
                 st = worker.pop_stats()
+                timing = worker.timing
+                worker.timing = {}
                 parts = []
                 for cid, s in list(stream_threads.items()):
                     fr = s.frames
@@ -1168,7 +1179,10 @@ def main():
                     w = st.get(cid, {"seen": 0, "scanned": 0, "ms": 0.0})
                     avg = w["ms"] / w["scanned"] if w["scanned"] else 0.0
                     age = w.get("frame_age_ms", 0.0) / w["seen"] if w["seen"] else 0.0
-                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age")
+                    tm = timing.get(cid, {})
+                    detect_avg = tm.get("detect_ms", 0.0) / max(1, tm.get("detects", 0))
+                    embed_avg = tm.get("embed_ms", 0.0) / max(1, tm.get("embeds", 0))
+                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age | detect {detect_avg:.0f} ms | embed {embed_avg:.0f} ms ({tm.get('embeds', 0)} faces)")
                 if parts:
                     print("[STATS] " + "   ||   ".join(parts))
 
