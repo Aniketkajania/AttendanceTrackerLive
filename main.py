@@ -308,6 +308,16 @@ def save_camera(c: CameraIn):
     )
     return {"ok": True, "camera_id": cam_id}
 
+@app.get("/api/cameras/{camera_id}/metrics")
+def camera_metrics(camera_id: str):
+    # Authenticated users may inspect a camera's stream health, without exposing credentials.
+    cam = query("SELECT camera_id, is_active FROM cameras WHERE camera_id=?", (camera_id,))
+    if not cam:
+        raise HTTPException(404, "Camera not found")
+    worker = CAM_WORKERS.get(camera_id)
+    return worker.metrics() if worker else {"camera_id":camera_id,"connected":False,"frame_age_ms":None,"capture_fps_average":0}
+
+
 # ---------- Native WebRTC (WHEP) Endpoint ----------
 pcs = set()
 import threading
@@ -322,6 +332,9 @@ class CameraWorker:
         self.config = camera_config
         self.camera_id = camera_config["camera_id"]
         self.latest_frame = None
+        self.frame_ts = 0.0
+        self.frames_captured = 0
+        self.started_at = time.monotonic()
         self.running = True
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -366,18 +379,28 @@ class CameraWorker:
             if success and frame is not None:
                 # Resize if > 720p to save WebRTC bandwidth
                 h, w = frame.shape[:2]
-                if w > 1280:
-                    frame = cv2.resize(frame, (1280, int(h * 1280 / w)), interpolation=cv2.INTER_AREA)
+                if w > 960:
+                    frame = cv2.resize(frame, (960, int(h * 960 / w)), interpolation=cv2.INTER_AREA)
                 
                 with self.lock:
                     self.latest_frame = frame
-            time.sleep(0.033)  # ~30 FPS
+                    self.frame_ts = time.monotonic()
+                    self.frames_captured += 1
+            # cap.grab() already blocks for live stream frames; an additional fixed
+            # sleep causes buffering and increases latency on busy camera servers.
 
         cap.release()
 
     def get_frame(self):
         with self.lock:
             return self.latest_frame.copy() if self.latest_frame is not None else None
+
+    def metrics(self):
+        with self.lock:
+            age = (time.monotonic() - self.frame_ts) if self.frame_ts else None
+            return {"camera_id": self.camera_id, "connected": age is not None and age < 5,
+                    "frame_age_ms": round(age * 1000) if age is not None else None,
+                    "capture_fps_average": round(self.frames_captured / max(.001, time.monotonic() - self.started_at), 1)}
 
 
 class ResilientVideoStreamTrack(VideoStreamTrack):
