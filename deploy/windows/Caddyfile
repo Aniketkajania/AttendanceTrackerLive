@@ -1,0 +1,13 @@
+# Caddy for Windows: automatic HTTPS (public DNS name) or `tls internal` for an intranet name.
+attendance.yourcompany.com {
+    # tls internal            # <- uncomment for an internal-only hostname
+    root * C:\attendance\app\frontend\dist
+    encode gzip
+    @backend path /api/* /snapshots/* /photos/*
+    reverse_proxy @backend 127.0.0.1:8000
+    try_files {path} /index.html
+    file_server
+    request_body {
+        max_size 25MB
+    }
+}

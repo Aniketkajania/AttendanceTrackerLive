@@ -1,0 +1,14 @@
+[Unit]
+Description=Attendance Face Recognition Engine
+After=network-online.target
+[Service]
+User=attendance
+WorkingDirectory=/srv/attendance/app
+EnvironmentFile=/srv/attendance/app/.env
+ExecStart=/srv/attendance/venv/bin/python server_engine.py
+Restart=always
+RestartSec=5
+# insightface downloads models to ~/.insightface on first run
+Environment=HOME=/srv/attendance
+[Install]
+WantedBy=multi-user.target

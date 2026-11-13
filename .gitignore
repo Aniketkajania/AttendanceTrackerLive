@@ -1,0 +1,94 @@
+# ==============================
+# Databases (employee data, logs, logins)
+# ==============================
+*.db
+*.sqlite
+*.sqlite3
+*.sqpro
+*.db-journal
+*.db-wal
+*.db-shm
+*.bak
+*.sqbpro
+
+# ==============================
+# Secrets and credentials
+# ==============================
+.env
+.env.*
+config_local.py
+*.pem
+*.key
+*.crt
+secrets.json
+
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*$py.class
+env/
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ==============================
+# React / Node frontend
+# ==============================
+node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+/LiveAttendance/
+
+# ==============================
+# Runtime data (personal photos and gate captures)
+# ==============================
+snapshots/
+enrollment_photos/
+exports/
+*.xlsx
+*.csv
+
+# ==============================
+# AI model files (large, downloaded automatically)
+# ==============================
+.insightface/
+*.onnx
+*.pth
+*.pt
+
+# ==============================
+# Logs and temp files
+# ==============================
+*.log
+logs/
+*.tmp
+*.temp
+/LiveAttendance/
+# ==============================
+# IDE / Editor
+# ==============================
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# ==============================
+# OS generated files
+# ==============================
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
