@@ -35,6 +35,7 @@ from config import PHOTOS_DIR, SNAPSHOTS_DIR, LOCATIONS, ALLOWED_ORIGINS, API_US
 from db import connect, query, execute, IntegrityError
 from auth import router as auth_router, auth_middleware, init_auth
 from users_api import router as users_router
+from operations_api import router as operations_router
 from face_pipeline import yaw_proxy
 
 app = FastAPI(title="Attendance API")
@@ -49,6 +50,7 @@ app.add_middleware(
 app.middleware("http")(auth_middleware)
 app.include_router(auth_router)
 app.include_router(users_router)
+app.include_router(operations_router)
 init_auth()
 
 app.mount("/snapshots", StaticFiles(directory=SNAPSHOTS_DIR), name="snapshots")
