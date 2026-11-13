@@ -15,6 +15,7 @@ os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS",
 import time
 import json
 import asyncio
+import threading
 from typing import Optional
 from urllib.parse import quote
 
@@ -67,8 +68,15 @@ def to_url(path: Optional[str]) -> Optional[str]:
     return quote(p[i:], safe="/")
 
 _face_app = None
+_face_model_lock = threading.RLock()
 
 def get_face_model():
+    global _face_app
+    with _face_model_lock:
+        return _load_face_model()
+
+
+def _load_face_model():
     global _face_app
     if _face_app is None:
         from insightface.app import FaceAnalysis
@@ -82,6 +90,27 @@ def get_face_model():
         )
         _face_app.prepare(ctx_id=0 if use_gpu else -1, det_size=(640, 640))
     return _face_app
+
+
+def analyze_face_image(image):
+    with _face_model_lock:
+        faces = get_face_model().get(image)
+    if not faces:
+        return None, 0
+    return max(faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1])), len(faces)
+
+
+def decode_face_upload(raw):
+    if not raw or len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(413, 'Image must be 1 byte to 8 MB')
+    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if image is None or image.ndim != 3:
+        raise HTTPException(422, 'Invalid JPEG or PNG image')
+    h, w = image.shape[:2]
+    if min(h, w) < 160 or h*w > 12_000_000:
+        raise HTTPException(422, 'Image must be at least 160px per side and at most 12MP')
+    return image
+
 
 def _enroll_quality(face, img_shape):
     """Reject enrolment photos that would poison the master embedding. Returns (ok, reason)."""
@@ -157,6 +186,24 @@ def logs(search: Optional[str] = None, limit: int = 200):
         r["snapshot_url"] = to_url(r.get("snapshot_image"))
     return rows
 
+# ---------- face detection precheck ----------
+@app.post("/api/face/detect")
+async def face_detect(request: Request, image: UploadFile = File(...)):
+    if request.state.user["role"] not in ("admin", "hr"):
+        raise HTTPException(403, "Insufficient permissions")
+    if image.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+        raise HTTPException(415, "Only JPEG and PNG images are accepted")
+    raw = await image.read(8 * 1024 * 1024 + 1)
+    img = decode_face_upload(raw)
+    face, count = await asyncio.to_thread(analyze_face_image, img)
+    if face is None:
+        return {"detected": False, "faces": 0, "usable": False, "reason": "No face detected"}
+    ok, why = _enroll_quality(face, img.shape)
+    return {"detected": True, "faces": count, "usable": bool(ok and count == 1),
+            "reason": "Multiple faces detected" if count > 1 else why,
+            "confidence": round(float(getattr(face, "det_score", 0)), 3),
+            "bbox": [int(x) for x in face.bbox]}
+
 # ---------- tab 3: employees ----------
 @app.get("/api/employees")
 def employees():
@@ -184,7 +231,6 @@ def enroll_employee(
     extra: list[UploadFile] = File(default=[]),
 ):
     emp_id = employee_id.strip().upper()
-    face_app = get_face_model()
     emp_dir = os.path.join(PHOTOS_DIR, emp_id)
     os.makedirs(emp_dir, exist_ok=True)
 
@@ -192,16 +238,20 @@ def enroll_employee(
     for i, ef in enumerate(extra or [], start=1):
         uploads[f"cctv_{i}.jpg"] = ef
     vecs, warnings = [], []
-    area = lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
 
     for fname, ufile in uploads.items():
-        arr = np.frombuffer(ufile.file.read(), dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        faces = face_app.get(img) if img is not None else []
-        if not faces:
-            warnings.append(f"No face detected in {fname}, skipped.")
+        try:
+            img = decode_face_upload(ufile.file.read())
+        except HTTPException as err:
+            warnings.append(f'{fname} skipped: {err.detail}')
             continue
-        primary = max(faces, key=area)
+        primary, face_count = analyze_face_image(img)
+        if primary is None:
+            warnings.append(f'No face detected in {fname}, skipped.')
+            continue
+        if face_count != 1:
+            warnings.append(f'{fname} has {face_count} faces, skipped.')
+            continue
         cv2.imwrite(os.path.join(emp_dir, fname), img)
         
         # Only frontal photos (front, neutral, CCTV frames) feed the master vector; left/right would blur it.
