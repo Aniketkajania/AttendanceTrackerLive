@@ -9,7 +9,10 @@ This branch does **not** copy the CamSec UI. It retains the Gateway Distriparks 
 - Leave requests and HR/admin approval or rejection.
 - Office area definitions.
 - Access restrictions: HR/admin manage visitors and leave; admin creates shifts and areas; admin/HR assign shifts.
+- Face detection precheck: `POST /api/face/detect` (admin/HR, JPEG/PNG multipart field `image`, 8 MB maximum); UI shows face quality and confirms at least one usable frontal photo. This is photo enrollment QA, not continuous camera event recognition.
 - Camera API preview processing reduced to maximum 960px width, no added 33ms sleep after capture; camera diagnostics endpoint at `GET /api/cameras/{camera_id}/metrics`.
+
+Detection checks may take multiple seconds on CPU-only Windows Server. A green CI build is not proof that InsightFace can load on the user's Windows installation.
 
 These additions are **not** a complete equivalent of CamSec's proprietary product: visual people-counting, visitor facial recognition, liveness, shift-driven attendance calculations, area-to-camera association, granular custom roles, PDF reporting and full device-performance validation are not implemented. Do not advertise those features as delivered.
 
