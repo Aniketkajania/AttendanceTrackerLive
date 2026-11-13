@@ -10,7 +10,7 @@ This is a **CamSec-inspired implementation**, not CamSec AI Pro source code or a
 | Attendance IN/OUT audit and Excel | Existing | Existing gate-role-based punch semantics |
 | Employee account roles | Existing | Admin, HR, viewer; custom permission builder not implemented |
 | Shifts and assignments | Backend/UI implemented | SQL migration 001 required |
-| Leave requests and approvals | Backend/UI implemented | SQL migration 001 required |
+| Leave requests and approvals | Removed by request | Legacy table retained for data safety; API/UI disabled |
 | Visitor register and checkout | Backend/UI implemented | SQL migration 001 required; manual only |
 | Areas | Backend/UI implemented | SQL migration 001 required |
 | Camera-to-area mapping | Newly implemented | SQL migration 002 required; administrative only |
