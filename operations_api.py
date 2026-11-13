@@ -80,7 +80,7 @@ class LeaveIn(BaseModel):
 
 @router.get("/leaves")
 def leaves(request: Request, status: Optional[str] = None):
-    permitted(request, ("admin", "hr", "viewer"))
+    permitted(request, ("admin", "hr"))
     if status and status not in ("PENDING", "APPROVED", "REJECTED"):
         raise HTTPException(422, "Invalid status")
     sql = """SELECT l.id,l.employee_id,u.person_name,CONVERT(VARCHAR(10),l.start_date,23) AS start_date,
@@ -155,7 +155,7 @@ class VisitorIn(BaseModel):
 
 @router.get("/visitors")
 def visitors(request: Request, date_filter: Optional[date] = None):
-    permitted(request, ("admin", "hr", "viewer"))
+    permitted(request, ("admin", "hr"))
     sql = """SELECT TOP 500 id,full_name,organization,host_employee_id,purpose,location,
              CONVERT(VARCHAR(19),checked_in_at,120) AS checked_in_at,
              CONVERT(VARCHAR(19),checked_out_at,120) AS checked_out_at
