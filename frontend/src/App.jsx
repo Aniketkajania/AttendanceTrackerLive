@@ -29,9 +29,9 @@ const NAV = [
   { id: "cams", label: "Cameras & RTSP", icon: Camera, page: Cameras, roles: ["admin"] },
   { id: "users", label: "User Access", icon: UserCog, page: Users, roles: ["admin"] },
   { id: "overview", label: "Analytics", icon: BarChart3, page: () => <Operations mode="overview" />, roles: ALL },
-  { id: "visitors", label: "Visitors", icon: ContactRound, page: () => <Operations mode="visitors" />, roles: ALL },
+  { id: "visitors", label: "Visitors", icon: ContactRound, page: () => <Operations mode="visitors" />, roles: ["admin", "hr"] },
   { id: "shifts", label: "Shift Management", icon: Clock3, page: () => <Operations mode="shifts" />, roles: ALL },
-  { id: "leaves", label: "Leave Management", icon: ClipboardList, page: () => <Operations mode="leaves" />, roles: ALL },
+  { id: "leaves", label: "Leave Management", icon: ClipboardList, page: () => <Operations mode="leaves" />, roles: ["admin", "hr"] },
   { id: "areas", label: "Area Selection", icon: MapPinned, page: () => <Operations mode="areas" />, roles: ALL },
 ];
 
