@@ -69,8 +69,8 @@ from face_pipeline import (
 )
 
 # Tracks survive a missed detection a little longer, because we now process ~8 frames/s, not 30.
-fp.TRACK_TTL = 0.5
-fp.TRACK_TTL_CONFIRMED = 0.5
+fp.TRACK_TTL = float(os.getenv("UNCONFIRMED_TRACK_TTL", "2.0"))
+fp.TRACK_TTL_CONFIRMED = float(os.getenv("CONFIRMED_TRACK_TTL", "2.5"))
 
 
 # =====================================================================
@@ -82,13 +82,13 @@ DETECTOR_PACK = os.getenv("DETECTOR_PACK", "buffalo_s")                         
 # ---- stream decoding ----
 STREAM_BACKEND = os.getenv("STREAM_BACKEND", "auto").strip().lower()     # auto | ffmpeg | opencv
 DECODE_FPS = float(os.getenv("DECODE_FPS", "8"))                         # frames/s handed to the engine
-STREAM_MAX_WIDTH = int(os.getenv("STREAM_MAX_WIDTH", "1920"))            # larger frames are downscaled by ffmpeg
+STREAM_MAX_WIDTH = int(os.getenv("STREAM_MAX_WIDTH", "1280"))            # larger frames are downscaled by ffmpeg
 FFMPEG_HWACCEL = os.getenv("FFMPEG_HWACCEL", "").strip()                 # "", auto, cuda, d3d11va, qsv
 STALL_SEC = 8.0                                                          # no frames for this long -> restart ffmpeg
 RECONNECT_DELAY = 3.0
 
 # ---- idle gating ----
-MOTION_GATE = os.getenv("MOTION_GATE", "1").strip() == "1"
+MOTION_GATE = os.getenv("MOTION_GATE", "0").strip() == "1"
 MOTION_SIZE = (320, 180)        # frame is shrunk to this for the motion check
 MOTION_PIX_DELTA = 18           # grey-level change that counts as "moved"
 MOTION_MIN_PIXELS = 30          # changed pixels (of 57,600) needed to wake the detector
@@ -98,17 +98,20 @@ BUSY_SEC = 1.5                  # keep scanning every frame this long after a fa
 # ---- engine ----
 USE_INTEL_GPU = False
 DET_SIZE = (640, 640)           # only used for model.prepare(); real detection sizes live in face_pipeline.py
-INFER_EVERY = 0.12              # min seconds between passes per camera
+INFER_EVERY = float(os.getenv("INFER_EVERY", "0.08"))
 OVERLAY_TTL = 2.5
 PREVIEW_MAX_WIDTH = 1280
 SHOW_PREVIEW = _SHOW_PREVIEW
 REVERIFY = 2.0                  # confirmed tracks are re-checked this often (seconds)
 STATS_EVERY = 30                # seconds between [STATS] lines
+MAX_FRAME_AGE = float(os.getenv("MAX_FRAME_AGE", "1.25"))
+NEAR_RECOVERY_LIMIT = int(os.getenv("NEAR_RECOVERY_LIMIT", "1"))
+ENABLE_ENHANCEMENT = os.getenv("ENABLE_ENHANCEMENT", "0").strip() == "1"
+QUALITY_SCAN_INTERVAL = max(0.0, float(os.getenv("QUALITY_SCAN_INTERVAL", "0")))
+# Optional higher-resolution scan every N seconds per camera; 0 disables it.
 ORT_THREADS = int(os.getenv("ORT_THREADS", str(max(2, (os.cpu_count() or 4) // 2))))
 
-CAMERA_ROIS: dict = {
-    # "HO_IN": [(0.15, 0.05, 0.55, 0.85)]
-}
+CAMERA_ROIS: dict = {}
 TILE_GRID = None                # e.g. (3, 2)
 
 
@@ -854,7 +857,10 @@ class InferenceWorker(threading.Thread):
         self.last_infer = {}
         self.prev_small = {}              # camera_id -> previous small grey frame (motion gate)
         self.last_full = {}               # camera_id -> time of the last full scan
+        self.last_quality = {}            # last expensive quality scan per camera
         self.stats = {}                   # camera_id -> {"seen", "scanned", "ms"}
+        self.timing = {}
+        self.recognition_stats = {}
         self.running = True
 
     # ---------- preview side ----------
@@ -881,12 +887,13 @@ class InferenceWorker(threading.Thread):
     def run(self):
         while self.running:
             did_work = False
-            for cid, stream in list(self.streams.items()):
+            streams = sorted(list(self.streams.items()), key=lambda item: self.last_infer.get(item[0], 0.0))
+            for cid, stream in streams:
                 now = time.time()
                 if now - self.last_infer.get(cid, 0.0) < INFER_EVERY:
                     continue
                 frame, fts = stream.get_latest_frame()
-                if frame is None or fts == self.last_frame_ts.get(cid):
+                if frame is None or fts == self.last_frame_ts.get(cid) or now - fts > MAX_FRAME_AGE:
                     continue
                 self.last_frame_ts[cid] = fts
                 self.last_infer[cid] = now
@@ -899,8 +906,9 @@ class InferenceWorker(threading.Thread):
                     print(f"[INFER] {cid} error: {type(e).__name__}: {e}")
                 dt = time.time() - t0
 
-                st = self.stats.setdefault(cid, {"seen": 0, "scanned": 0, "ms": 0.0})
+                st = self.stats.setdefault(cid, {"seen": 0, "scanned": 0, "ms": 0.0, "frame_age_ms": 0.0})
                 st["seen"] += 1
+                st["frame_age_ms"] += max(0.0, now - fts) * 1000.0
                 if ran:
                     st["scanned"] += 1
                     st["ms"] += dt * 1000.0
@@ -908,7 +916,7 @@ class InferenceWorker(threading.Thread):
                         print(f"[SLOW] {cid}: one scan took {dt:.2f}s")
                 did_work = True
             if not did_work:
-                time.sleep(0.01)
+                time.sleep(0.005)
 
     # ---------- motion gate ----------
     def _motion(self, cid, gray):
@@ -940,17 +948,29 @@ class InferenceWorker(threading.Thread):
         self.last_full[cid] = now
 
         # enhancement (LAB conversion) only when the scene really is dark / blown out / flat
-        mean, std = float(gray.mean()), float(gray.std())
-        det_frame = frame if (95 <= mean <= 165 and std >= 40) else enhance_for_detection(frame)
-        dets = self.finder.detect(det_frame, rois=CAMERA_ROIS.get(cid), tile_grid=TILE_GRID)
+        if ENABLE_ENHANCEMENT:
+            mean, std = float(gray.mean()), float(gray.std())
+            det_frame = frame if (95 <= mean <= 165 and std >= 40) else enhance_for_detection(frame)
+        else:
+            det_frame = frame
+        detect_start = time.perf_counter()
+        high_accuracy = QUALITY_SCAN_INTERVAL > 0 and now - self.last_quality.get(cid, 0) >= QUALITY_SCAN_INTERVAL
+        if high_accuracy:
+            self.last_quality[cid] = now
+        dets = self.finder.detect(det_frame, rois=None, tile_grid=TILE_GRID, high_accuracy=high_accuracy)
+        tm = self.timing.setdefault(cid, {"detect_ms": 0.0, "embed_ms": 0.0, "embeds": 0, "detects": 0})
+        tm["detect_ms"] += (time.perf_counter() - detect_start) * 1000
+        tm["detects"] += 1
 
         for track, det in tracker.update(dets, now):
             self._process(track, det, frame, cam_cfg, users, matrix, now)
 
         # faces we were following but the full pass missed: look right where they were
+        recovery_attempts = 0
         for t in tracker.tracks:
-            if t.matched_now:
+            if t.matched_now or recovery_attempts >= NEAR_RECOVERY_LIMIT:
                 continue
+            recovery_attempts += 1
             d = self.finder.detect_near(det_frame, t.display_box(now))
             if d is not None:
                 t.update(d["bbox"], now)
@@ -985,7 +1005,13 @@ class InferenceWorker(threading.Thread):
             track.label, track.color = "Unknown", (0, 0, 255)
             return
 
+        embed_start = time.perf_counter()
         emb = self.finder.embed(frame, det["kps"], det["bbox"], det["score"])
+        tm = self.timing.setdefault(cam_cfg["camera_id"], {"detect_ms": 0.0, "embed_ms": 0.0, "embeds": 0, "detects": 0})
+        tm["embed_ms"] += (time.perf_counter() - embed_start) * 1000
+        tm["embeds"] += 1
+        if track.good_samples == 0:
+            track.first_embedding_at = time.time()
         track.embs.append((emb, q))
         track.good_samples += 1
         track.last_verify = now
@@ -1025,7 +1051,21 @@ class InferenceWorker(threading.Thread):
             track.confirmed_name = best["person_name"]
             track.confirmed_score = s1
             track.disagree = 0
-            self._record(track, best, cam_cfg, s1, track.best_frame, track.best_bbox, now)
+            confirmed_at = time.time()
+            detected_to_confirm_ms = max(0.0, (confirmed_at - track.created) * 1000.0)
+            first_embed_to_confirm_ms = max(0.0, (confirmed_at - getattr(track, "first_embedding_at", confirmed_at)) * 1000.0)
+            queued = self._record(track, best, cam_cfg, s1, track.best_frame, track.best_bbox, now)
+            print(
+                f"[RECOGNITION] camera={cam_cfg['camera_id']} track={track.id} "
+                f"detected_to_confirm={detected_to_confirm_ms:.0f}ms "
+                f"first_embedding_to_confirm={first_embed_to_confirm_ms:.0f}ms "
+                f"samples={track.good_samples} confidence={s1:.3f} "
+                f"attendance={'queued' if queued else 'not_queued_or_cooldown'}",
+                flush=True,
+            )
+            rec = self.recognition_stats.setdefault(cam_cfg["camera_id"], {"count": 0, "total_ms": 0.0})
+            rec["count"] += 1
+            rec["total_ms"] += detected_to_confirm_ms
             track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
         elif matched:
             track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
@@ -1039,9 +1079,11 @@ class InferenceWorker(threading.Thread):
             track.recorded_at = now
             try:
                 self.events.put_nowait((user, dict(cam_cfg), score, frame, np.array(bbox, copy=True)))
+                return True
             except queue.Full:
                 self.cooldown_tracker.pop(key, None)    # allow a retry on the next sighting
                 print("[EVENTS] queue full, punch not recorded (will retry on next sighting)")
+        return False
 
     def _refresh_label(self, track, cam_role, now):
         """Overrides any cooldown or system text to strictly show Name (Score)."""
@@ -1150,6 +1192,10 @@ def main():
                 dt = now_epoch - last_stats
                 last_stats = now_epoch
                 st = worker.pop_stats()
+                timing = worker.timing
+                worker.timing = {}
+                recognition_stats = worker.recognition_stats
+                worker.recognition_stats = {}
                 parts = []
                 for cid, s in list(stream_threads.items()):
                     fr = s.frames
@@ -1157,7 +1203,17 @@ def main():
                     prev_frames[cid] = fr
                     w = st.get(cid, {"seen": 0, "scanned": 0, "ms": 0.0})
                     avg = w["ms"] / w["scanned"] if w["scanned"] else 0.0
-                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan")
+                    age = w.get("frame_age_ms", 0.0) / w["seen"] if w["seen"] else 0.0
+                    tm = timing.get(cid, {})
+                    detect_avg = tm.get("detect_ms", 0.0) / max(1, tm.get("detects", 0))
+                    embed_avg = tm.get("embed_ms", 0.0) / max(1, tm.get("embeds", 0))
+                    recognized = recognition_stats.get(cid, {})
+                    confirmed_count = recognized.get("count", 0)
+                    confirmation_summary = (
+                        f" | confirmed {confirmed_count} | avg detect-to-confirm {recognized['total_ms'] / confirmed_count:.0f}ms"
+                        if confirmed_count else ""
+                    )
+                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age | detect {detect_avg:.0f} ms | embed {embed_avg:.0f} ms ({tm.get('embeds', 0)} faces){confirmation_summary}")
                 if parts:
                     print("[STATS] " + "   ||   ".join(parts))
 
