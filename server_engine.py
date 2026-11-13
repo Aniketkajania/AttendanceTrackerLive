@@ -903,8 +903,9 @@ class InferenceWorker(threading.Thread):
                     print(f"[INFER] {cid} error: {type(e).__name__}: {e}")
                 dt = time.time() - t0
 
-                st = self.stats.setdefault(cid, {"seen": 0, "scanned": 0, "ms": 0.0})
+                st = self.stats.setdefault(cid, {"seen": 0, "scanned": 0, "ms": 0.0, "frame_age_ms": 0.0})
                 st["seen"] += 1
+                st["frame_age_ms"] += max(0.0, now - fts) * 1000.0
                 if ran:
                     st["scanned"] += 1
                     st["ms"] += dt * 1000.0
@@ -1166,7 +1167,8 @@ def main():
                     prev_frames[cid] = fr
                     w = st.get(cid, {"seen": 0, "scanned": 0, "ms": 0.0})
                     avg = w["ms"] / w["scanned"] if w["scanned"] else 0.0
-                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan")
+                    age = w.get("frame_age_ms", 0.0) / w["seen"] if w["seen"] else 0.0
+                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age")
                 if parts:
                     print("[STATS] " + "   ||   ".join(parts))
 
