@@ -1009,6 +1009,8 @@ class InferenceWorker(threading.Thread):
         tm = self.timing.setdefault(cam_cfg["camera_id"], {"detect_ms": 0.0, "embed_ms": 0.0, "embeds": 0, "detects": 0})
         tm["embed_ms"] += (time.perf_counter() - embed_start) * 1000
         tm["embeds"] += 1
+        if track.good_samples == 0:
+            track.first_embedding_at = time.time()
         track.embs.append((emb, q))
         track.good_samples += 1
         track.last_verify = now
@@ -1048,7 +1050,18 @@ class InferenceWorker(threading.Thread):
             track.confirmed_name = best["person_name"]
             track.confirmed_score = s1
             track.disagree = 0
-            self._record(track, best, cam_cfg, s1, track.best_frame, track.best_bbox, now)
+            confirmed_at = time.time()
+            detected_to_confirm_ms = max(0.0, (confirmed_at - track.created) * 1000.0)
+            first_embed_to_confirm_ms = max(0.0, (confirmed_at - getattr(track, "first_embedding_at", confirmed_at)) * 1000.0)
+            queued = self._record(track, best, cam_cfg, s1, track.best_frame, track.best_bbox, now)
+            print(
+                f"[RECOGNITION] camera={cam_cfg['camera_id']} track={track.id} "
+                f"detected_to_confirm={detected_to_confirm_ms:.0f}ms "
+                f"first_embedding_to_confirm={first_embed_to_confirm_ms:.0f}ms "
+                f"samples={track.good_samples} confidence={s1:.3f} "
+                f"attendance={'queued' if queued else 'not_queued_or_cooldown'}",
+                flush=True,
+            )
             track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
         elif matched:
             track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
@@ -1062,9 +1075,11 @@ class InferenceWorker(threading.Thread):
             track.recorded_at = now
             try:
                 self.events.put_nowait((user, dict(cam_cfg), score, frame, np.array(bbox, copy=True)))
+                return True
             except queue.Full:
                 self.cooldown_tracker.pop(key, None)    # allow a retry on the next sighting
                 print("[EVENTS] queue full, punch not recorded (will retry on next sighting)")
+        return False
 
     def _refresh_label(self, track, cam_role, now):
         """Overrides any cooldown or system text to strictly show Name (Score)."""
