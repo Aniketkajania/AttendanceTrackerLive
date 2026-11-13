@@ -20,6 +20,7 @@ What it fixes
 from __future__ import annotations
 
 from collections import deque
+import os
 
 import cv2
 import numpy as np
@@ -30,7 +31,12 @@ from insightface.app.common import Face
 # =====================================================================
 # Detector input sizes. MUST be multiples of 32. Keep this set small and FIXED:
 # GPU providers (DirectML/OpenVINO) re-compile the model for every new input shape.
-FULL_SIZES = {"wide": (960, 544), "std": (800, 608), "tall": (640, 640)}
+# CPU fast detector profile: smaller input, less work, but may miss distant small faces.
+DETECTION_PROFILE = os.getenv("DETECTION_PROFILE", "quality").strip().lower()
+if DETECTION_PROFILE == "fast":
+    FULL_SIZES = {"wide": (640, 384), "std": (640, 480), "tall": (512, 512)}
+else:
+    FULL_SIZES = {"wide": (960, 544), "std": (800, 608), "tall": (640, 640)}
 ROI_DET_SIZE = (640, 640)       # native-resolution crops (ROIs / tiles)
 DET_THRESH = 0.40               # raw detector threshold (low on purpose; quality gates filter later)
 MIN_DET_PX = 14                 # ignore detections smaller than this (noise)
