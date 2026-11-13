@@ -26,6 +26,33 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code,403)
         self.assertEqual(ops.permitted(req("hr"), ("admin","hr"))["username"], "tester")
 
+    def test_readiness_reports_missing_tables(self):
+        with patch.object(ops,"query",return_value=[{"name":"attendance_shifts"}]):
+            result=ops.readiness(req("admin"))
+        self.assertFalse(result["ready"])
+        self.assertIn("attendance_visitors", result["missing_tables"])
+
+    def test_readiness_denies_viewers(self):
+        with patch.object(ops,"query") as query:
+            with self.assertRaises(HTTPException):
+                ops.readiness(req("viewer"))
+            query.assert_not_called()
+
+    def test_visitor_checkin_and_checkout(self):
+        visitor=ops.VisitorIn(full_name="Test Visitor", location="HO")
+        with patch.object(ops,"execute") as execute:
+            ops.checkin_visitor(visitor,req("hr"))
+            execute.assert_called_once()
+        with patch.object(ops,"query",return_value=[{"id":7}]), patch.object(ops,"execute") as execute:
+            self.assertEqual(ops.checkout_visitor(7,req("hr")),{"ok":True})
+            execute.assert_called_once()
+
+    def test_shift_creation(self):
+        shift=ops.ShiftIn(shift_name="Day",start_time="09:00",end_time="18:00")
+        with patch.object(ops,"execute") as execute:
+            self.assertEqual(ops.add_shift(shift,req("admin")),{"ok":True})
+            execute.assert_called_once()
+
     def test_empty_daily_roster(self):
         with patch.object(ops,"query",return_value=[]):
             report=ops.daily_report(req("viewer"),date(2026,11,13))
