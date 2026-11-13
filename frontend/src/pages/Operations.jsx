@@ -3,7 +3,7 @@ import { api } from "../api";
 import { Panel, Kpi, inputCls, btnCls, btnSecondaryCls } from "../ui";
 import { Users, UserCheck, UserX, ContactRound, CalendarDays, Plus, RefreshCcw } from "lucide-react";
 
-const today = () => new Date().toLocaleDateString("en-CA");
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
 const headings = {
   overview: ["Attendance Analytics", "Live daily staff and visitor statistics"],
   reports: ["Daily Attendance Report", "Shift-aware roster, punch status and downloadable CSV"],
@@ -60,6 +60,7 @@ export default function Operations({ mode }) {
   const [cameraAssignment, setCameraAssignment] = useState({ camera_id:"",area_id:"" });
   const [report, setReport] = useState(null);
   const [reportLocation, setReportLocation] = useState("");
+  const [locations, setLocations] = useState([]);
 
   const load = useCallback(async () => {
     try {
@@ -69,6 +70,7 @@ export default function Operations({ mode }) {
         : mode === "reports"
         ? await api(`/api/operations/reports/daily?work_date=${date}${reportLocation ? `&location=${encodeURIComponent(reportLocation)}` : ""}`)
         : await api(`/api/operations/${mode}`);
+      if (mode === "reports") setLocations(await api("/api/operations/report-locations"));
       if (mode === "overview") {
         setOverview(data);
         setActivity(await api(`/api/operations/analytics/activity?work_date=${date}`));
@@ -116,7 +118,7 @@ export default function Operations({ mode }) {
     finally { setBusy(false); }
   };
 
-  const canCreate = role === "admin" || (role === "hr" && mode === "visitors");
+  const canCreate = ["visitors", "shifts", "areas"].includes(mode) && (role === "admin" || (role === "hr" && mode === "visitors"));
   const [heading, subtitle] = headings[mode] || ["Operations", ""];
 
   return <div className="space-y-6">
@@ -163,8 +165,11 @@ export default function Operations({ mode }) {
           <label className="text-xs font-semibold text-slate-600">Reporting Date
             <input type="date" className={inputCls+" mt-1"} value={date} onChange={e=>setDate(e.target.value)} />
           </label>
-          <label className="text-xs font-semibold text-slate-600">Location (exact)
-            <input className={inputCls+" mt-1"} value={reportLocation} placeholder="All locations" onChange={e=>setReportLocation(e.target.value)} />
+          <label className="text-xs font-semibold text-slate-600">Location
+            <select className={inputCls+" mt-1"} value={reportLocation} onChange={e=>setReportLocation(e.target.value)}>
+              <option value="">All locations</option>
+              {locations.map(x=><option key={x} value={x}>{x}</option>)}
+            </select>
           </label>
           <a className={btnSecondaryCls} href={`/api/operations/reports/daily.csv?work_date=${date}${reportLocation ? `&location=${encodeURIComponent(reportLocation)}` : ""}`}>Export CSV</a>
         </div>
