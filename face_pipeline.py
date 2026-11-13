@@ -148,7 +148,10 @@ class FaceFinder:
 
     def warmup(self):
         """Run every fixed detector shape once so the first real frame is not slow (GPU providers compile per shape)."""
-        for (w, h) in set(FULL_SIZES.values()) | {ROI_DET_SIZE, NEAR_DET_SIZE}:
+        sizes = set(FULL_SIZES.values()) | {ROI_DET_SIZE, NEAR_DET_SIZE}
+        if os.getenv("QUALITY_SCAN_INTERVAL", "0") not in ("0", "0.0"):
+            sizes |= {(960, 544), (800, 608), (640, 640)}
+        for (w, h) in sizes:
             self._raw(np.zeros((h, w, 3), np.uint8), (w, h))
 
     # ---------- raw SCRFD call ----------
@@ -172,7 +175,7 @@ class FaceFinder:
         return out
 
     # ---------- multi-pass detection ----------
-    def detect(self, frame, rois=None, tile_grid=None):
+    def detect(self, frame, rois=None, tile_grid=None, high_accuracy=False):
         """
         frame     : (enhanced) full-resolution BGR frame
         rois      : optional list of normalised (x1,y1,x2,y2) regions scanned at native resolution
@@ -180,7 +183,8 @@ class FaceFinder:
                     part of the frame is covered at high resolution every cols*rows cycles.
         """
         h, w = frame.shape[:2]
-        dets = self._raw(frame, _pick_full_size(w, h))
+        size = ({"wide": (960, 544), "std": (800, 608), "tall": (640, 640)}["wide" if w / float(h) >= 1.6 else "std" if w / float(h) >= 1.2 else "tall"]) if high_accuracy else _pick_full_size(w, h)
+        dets = self._raw(frame, size)
 
         regions = []
         for r in rois or []:
