@@ -108,17 +108,10 @@ MAX_FRAME_AGE = float(os.getenv("MAX_FRAME_AGE", "1.25"))
 NEAR_RECOVERY_LIMIT = int(os.getenv("NEAR_RECOVERY_LIMIT", "1"))
 ENABLE_ENHANCEMENT = os.getenv("ENABLE_ENHANCEMENT", "0").strip() == "1"
 QUALITY_SCAN_INTERVAL = max(0.0, float(os.getenv("QUALITY_SCAN_INTERVAL", "0")))
-ENTRANCE_ROI_INTERVAL = max(0.0, float(os.getenv("ENTRANCE_ROI_INTERVAL", "0.6")))
-# Optional camera-specific entrance ROI, normalized to 0..1 image coordinates. Off unless configured.
 # Optional higher-resolution scan every N seconds per camera; 0 disables it.
 ORT_THREADS = int(os.getenv("ORT_THREADS", str(max(2, (os.cpu_count() or 4) // 2))))
 
-CAMERA_ROIS: dict = {
-    # HO_IN doorway, estimated from preview; adjust using real camera frame.
-    # Enabled only when HO_IN_ENTRANCE_ROI=1.
-}
-if os.getenv("HO_IN_ENTRANCE_ROI", "0").strip() == "1":
-    CAMERA_ROIS["HO_IN"] = [(0.22, 0.04, 0.47, 0.61)]
+CAMERA_ROIS: dict = {}
 TILE_GRID = None                # e.g. (3, 2)
 
 
@@ -865,7 +858,6 @@ class InferenceWorker(threading.Thread):
         self.prev_small = {}              # camera_id -> previous small grey frame (motion gate)
         self.last_full = {}               # camera_id -> time of the last full scan
         self.last_quality = {}            # last expensive quality scan per camera
-        self.last_entrance = {}           # last scheduled entrance ROI scan
         self.stats = {}                   # camera_id -> {"seen", "scanned", "ms"}
         self.timing = {}
         self.running = True
@@ -964,13 +956,7 @@ class InferenceWorker(threading.Thread):
         high_accuracy = QUALITY_SCAN_INTERVAL > 0 and now - self.last_quality.get(cid, 0) >= QUALITY_SCAN_INTERVAL
         if high_accuracy:
             self.last_quality[cid] = now
-        # Scan the whole scene quickly; selectively use high-detail ROI only when due.
-        rois = None
-        if CAMERA_ROIS.get(cid) and ENTRANCE_ROI_INTERVAL > 0:
-            if now - self.last_entrance.get(cid, 0.0) >= ENTRANCE_ROI_INTERVAL:
-                rois = CAMERA_ROIS[cid]
-                self.last_entrance[cid] = now
-        dets = self.finder.detect(det_frame, rois=rois, tile_grid=TILE_GRID, high_accuracy=high_accuracy)
+        dets = self.finder.detect(det_frame, rois=None, tile_grid=TILE_GRID, high_accuracy=high_accuracy)
         tm = self.timing.setdefault(cid, {"detect_ms": 0.0, "embed_ms": 0.0, "embeds": 0, "detects": 0})
         tm["detect_ms"] += (time.perf_counter() - detect_start) * 1000
         tm["detects"] += 1
