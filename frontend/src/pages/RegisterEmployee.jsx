@@ -16,6 +16,7 @@ export default function RegisterEmployee() {
   const [form, setForm] = useState({ employee_id: "", person_name: "", email: "", base_location: "" });
   const [files, setFiles] = useState({});
   const [busy, setBusy] = useState(false);
+  const [faceChecks, setFaceChecks] = useState({});
   const [msg, setMsg] = useState(null);
 
   // Camera states
@@ -87,6 +88,7 @@ export default function RegisterEmployee() {
         const file = new File([blob], `${slotKey}_${Date.now()}.jpg`, { type: "image/jpeg" });
 
         setFiles((prev) => ({ ...prev, [slotKey]: file }));
+        setFaceChecks((prev) => ({ ...prev, [slotKey]: undefined }));
 
         // Auto-advance to next missing slot or next index
         if (activeSlotIdx < SLOTS.length - 1) {
@@ -105,10 +107,31 @@ export default function RegisterEmployee() {
     setShowCamera(true);
   };
 
+  const verifyPhotos = async () => {
+    setBusy(true);
+    setMsg(null);
+    const outcomes = {};
+    try {
+      for (const [slot, label] of SLOTS) {
+        if (!files[slot]) { outcomes[slot] = { usable: false, reason: "Missing photo" }; continue; }
+        const fd = new FormData();
+        fd.append("image", files[slot]);
+        try { outcomes[slot] = await api("/api/face/detect", { method: "POST", body: fd }); }
+        catch (err) { outcomes[slot] = { usable: false, reason: err.message }; }
+      }
+      setFaceChecks(outcomes);
+      const usable = ["front", "neutral"].some(k => outcomes[k]?.usable);
+      setMsg({ ok: usable, text: usable ? "Face detection completed. A usable frontal image is available for enrollment." : "No usable front/neutral face. Retake your photos before registration." });
+      return usable;
+    } finally { setBusy(false); }
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     if (SLOTS.some(([k]) => !files[k])) return setMsg({ ok: false, text: "Please add all 4 photos." });
     
+    const valid = await verifyPhotos();
+    if (!valid) return;
     const fd = new FormData();
     Object.entries(form).forEach(([k, v]) => fd.append(k, v));
     SLOTS.forEach(([k]) => fd.append(k, files[k]));
@@ -119,6 +142,7 @@ export default function RegisterEmployee() {
       const r = await api("/api/employees", { method: "POST", body: fd });
       setMsg({ ok: true, text: `Registered/Updated ${r.employee_id} using ${r.vectors_used} face vectors. ${r.warnings?.join(" ") || ""}` });
       setFiles({});
+      setFaceChecks({});
       // Clear form after successful registration
       setForm({ employee_id: "", person_name: "", email: "", base_location: locs[0] || "" });
       loadEmps();
@@ -135,7 +159,8 @@ export default function RegisterEmployee() {
       email: emp.email,
       base_location: emp.base_location || locs[0] || "",
     });
-    setFiles({}); // Clear files so new photos are mandatory for re-registration
+    setFiles({});
+    setFaceChecks({}); // Clear files so new photos are mandatory for re-registration
     setMsg({ ok: true, text: `Editing ${emp.employee_id}. Please take new photos and submit to update.` });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -222,10 +247,11 @@ export default function RegisterEmployee() {
                         type="file"
                         accept="image/*"
                         hidden
-                        onChange={(e) => e.target.files?.[0] && setFiles({ ...files, [k]: e.target.files[0] })}
+                        onChange={(e) => { if (e.target.files?.[0]) { setFiles(v => ({ ...v, [k]: e.target.files[0] })); setFaceChecks(v => ({ ...v, [k]: undefined })); } }}
                       />
                     </label>
                   )}
+                  {faceChecks[k] && <span className={`absolute right-1 top-1 rounded px-1 text-[10px] ${faceChecks[k].usable ? "bg-emerald-600 text-white" : "bg-amber-100 text-amber-900"}`} title={faceChecks[k].reason || "Face detected"}>{faceChecks[k].usable ? "Face OK" : "Retake"}</span>}
                   <span className="absolute bottom-1.5 left-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
                     {label}
                   </span>
@@ -233,6 +259,7 @@ export default function RegisterEmployee() {
               ))}
             </div>
 
+            <button type="button" disabled={busy} onClick={verifyPhotos} className="w-full rounded-xl border border-blue-200 bg-blue-50 py-2 text-sm font-semibold text-blue-700 disabled:opacity-50">Check Face Detection</button>
             <button disabled={busy} className={`${btnCls} w-full`}>
               {busy && <Loader2 className="animate-spin" size={16} />}
               Extract face vector & register
