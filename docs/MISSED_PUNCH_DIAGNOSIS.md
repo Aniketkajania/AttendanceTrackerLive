@@ -2,6 +2,18 @@
 
 The attendance recognition process is **server_engine.py**, NOT the IIS React frontend or the FastAPI `main.py` service. A preview rendering correctly does not prove that the recognition process has detected, matched or recorded a punch.
 
+## Where the logs are saved
+
+Before this update the engine's diagnostic messages went to its CMD/PowerShell console only; they were **not necessarily saved**. With `diagnostic_logging.py` and the updated `server_engine.py`, the important `[MATCH_REJECT]`, `[STATS]`, `[SLOW]`, `[EVENTS]` lines are printed to console **and** saved to `logs/recognition.log` beside the engine code by default. The file rotates at 5 MB with up to three backups (`recognition.log.1`, etc.). No face images or embeddings are written by this logger, but successful attendance commits may include an employee ID; keep log files access-restricted and out of your IIS website directory.
+
+Example for the standard project checkout in PowerShell:
+
+```powershell
+Get-Content "C:\AttendanceTracker_mssql\at_mssql\logs\recognition.log" -Tail 80 -Wait
+```
+
+If the engine runs with a different code directory or you want a restricted log folder, set `ENGINE_LOG_DIR` **before starting the recognition engine**, e.g. `set ENGINE_LOG_DIR=C:\AttendanceTrackerLogs`. This is an environment variable of the recognition process, not the FastAPI service. Logging begins when the updated recognition engine process starts. Existing console history from previous runs is not backfilled.
+
 ## New read-only diagnostics
 After pulling this branch and restarting the **recognition engine in a controlled maintenance window** (do not restart it during attendance rush), watch the console or engine log:
 - `[MATCH_REJECT] ... reason=quality_too_small`: the detected face is too small; verify camera distance, lens and actual recognition-stream pixels
@@ -28,6 +40,12 @@ Scores and image-quality measurements are diagnostics, not a substitute for vali
 6. If quality gates dominate: adjust capture setup (distance, angle, lighting/shutter speed) and verify the recognition feed is the main stream, not the preview substream.
 7. If `attendance=queued` but no SQL row: check `[EVENTS]` and SQL availability, queue fullness, and punch cooldown. Do not infer successful write from a green overlay.
 8. If `DETECTION_PROFILE=fast` is set in the recognition engine environment, test `quality` in an isolated checkout or maintenance window and measure scan throughput. `quality` uses larger detector inputs, which can become *slower* on a four-core CPU. Do not automatically switch production profiles without testing.
+
+## Overlay and tracker changes
+
+The camera preview now uses the latest **measured** bounding box for drawing (not extrapolated motion), hides boxes that have not been observed for 0.6 seconds, and clamps movement prediction used for track association. Poor-quality faces display `Too Small`, `Blurry`, `Side Face` or `Low Conf` (orange); valid candidate matches awaiting more evidence display `Checking (1/2)` (yellow). `Unknown` now more accurately means no sufficiently distinct enrolled match was found, although a track can still be temporarily unverified. The match threshold and required confirmation votes have not been lowered.
+
+These are tracking/diagnostic changes, not a measured increase in attendance detection recall. The earlier 18–24-pixel rejected faces remain below the 25-pixel quality gate. Evaluate the new on-screen labels and logs with a registered employee, then separately benchmark adjustments to camera angle, resolution, or detector profile.
 
 ## Safeguards
 - Keep `SIMILARITY_THRESHOLD`, `MATCH_MARGIN`, `CONFIRM_VOTES` and `COOLDOWN_SECONDS` unchanged until actual rejection reasons are observed.
