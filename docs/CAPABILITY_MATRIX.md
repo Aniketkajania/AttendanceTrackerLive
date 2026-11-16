@@ -13,7 +13,7 @@ This is a **CamSec-inspired implementation**, not CamSec AI Pro source code or a
 | Leave requests and approvals | Removed by request | Legacy table retained for data safety; API/UI disabled |
 | Visitor register and checkout | Backend/UI implemented | SQL migration 001 required; manual only |
 | Areas | Backend/UI implemented | SQL migration 001 required |
-| Camera-to-area mapping | Newly implemented | SQL migration 002 required; administrative only |
+| Camera-to-area mapping | Removed by request | Old SQL mapping table retained; not used by the application |
 | Analytics overview | Implemented | Derived from existing attendance/leave/visitor tables |
 | Hourly and per-camera activity | Newly implemented | Verified punches only, NOT anonymous people counting |
 | Shift-aware daily roster and CSV | Newly implemented | Overnight/unassigned schedules flagged for review |
