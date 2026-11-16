@@ -62,6 +62,7 @@ from config import (
 )
 from db import connect
 from email_notifier import send_attendance_email_async
+from diagnostic_logging import setup_engine_logging, diag
 import face_pipeline as fp
 from face_pipeline import (
     FaceFinder, FaceTracker, enhance_for_detection,
@@ -685,7 +686,7 @@ def process_strict_in_out_event(user: dict, cam_config: dict, confidence: float,
     finally:
         conn.close()
 
-    print(f"[EVENTS] committed employee={emp_id} camera={cam_id} role={cam_role} at={now_ts_str}", flush=True)
+    diag(f"[EVENTS] committed employee={emp_id} camera={cam_id} role={cam_role} at={now_ts_str}")
     if email_payload:
         try:
             send_attendance_email_async(email_payload)
@@ -711,7 +712,7 @@ class EventWriter(threading.Thread):
             try:
                 process_strict_in_out_event(*item)
             except Exception as e:
-                print(f"[EVENTS] failed to record a punch: {type(e).__name__}: {e}")
+                diag(f"[EVENTS] failed to record a punch: {type(e).__name__}: {e}")
                 conn = getattr(_tls, "conn", None)      # do not leak the half-used connection
                 if conn is not None:
                     try:
@@ -930,7 +931,7 @@ class InferenceWorker(threading.Thread):
                     st["scanned"] += 1
                     st["ms"] += dt * 1000.0
                     if dt > 0.6:
-                        print(f"[SLOW] {cid}: one scan took {dt:.2f}s")
+                        diag(f"[SLOW] {cid}: one scan took {dt:.2f}s")
                 did_work = True
             if not did_work:
                 time.sleep(0.005)
@@ -1013,7 +1014,7 @@ class InferenceWorker(threading.Thread):
         key = (cid, track.id, reason)
         if now - self.rejection_log_at.get(key, 0) >= 10:
             self.rejection_log_at[key] = now
-            print(f"[MATCH_REJECT] camera={cid} track={track.id} reason={reason} {detail}", flush=True)
+            diag(f"[MATCH_REJECT] camera={cid} track={track.id} reason={reason} {detail}")
         if len(self.rejection_log_at) > 2000:
             cutoff = now - 30
             self.rejection_log_at = {k: t for k, t in self.rejection_log_at.items() if t >= cutoff}
@@ -1122,7 +1123,7 @@ class InferenceWorker(threading.Thread):
                 return True
             except queue.Full:
                 self.cooldown_tracker.pop(key, None)    # allow a retry on the next sighting
-                print("[EVENTS] queue full, punch not recorded (will retry on next sighting)")
+                diag("[EVENTS] queue full, punch not recorded (will retry on next sighting)")
         return False
 
     def _refresh_label(self, track, cam_role, now):
@@ -1161,6 +1162,7 @@ def render_preview(frame, boxes, cid, cam_cfg):
 def main():
     import signal
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    setup_engine_logging(os.path.dirname(os.path.abspath(__file__)))
     cv2.setNumThreads(2)            # OpenCV's own thread pool must not fight the models for cores
 
     print(f"[ENGINE] recognizer={FACE_MODEL}  detector={DETECTOR_PACK}  motion gate={'on' if MOTION_GATE else 'off'}")
@@ -1261,7 +1263,7 @@ def main():
                     )) if reasons else ""
                     parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age | detect {detect_avg:.0f} ms | embed {embed_avg:.0f} ms ({tm.get('embeds', 0)} faces){confirmation_summary}{rejection_summary}")
                 if parts:
-                    print("[STATS] " + "   ||   ".join(parts))
+                    diag("[STATS] " + "   ||   ".join(parts))
 
             # Preview only - recognition happens in the worker thread, so this never blocks on the model
             if SHOW_PREVIEW:
