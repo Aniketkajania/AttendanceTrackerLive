@@ -481,203 +481,216 @@ def process_strict_in_out_event(user: dict, cam_config: dict, confidence: float,
     now_ts_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT * FROM daily_attendance
-        WHERE employee_id = ? AND work_date = ?
-    """, (emp_id, work_date_str))
-    summary = cursor.fetchone()
-
-    email_payload = None
-    snapshot_path = None
-
-    # ==========================================================
-    # CASE 1: NO RECORD TODAY YET
-    # ==========================================================
-    if not summary:
-        if cam_role == "IN":
-            snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "FIRST_IN")
-            visited_str = cam_loc
-
-            cursor.execute("""
-                INSERT INTO daily_attendance (
-                    employee_id, person_name, base_location, work_date,
-                    first_check_in, first_check_in_camera, first_check_in_location, first_check_in_image,
-                    current_status, current_location, visited_locations,
-                    last_event_time, total_checks, out_of_office_hours, total_working_hours
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'IN', ?, ?, ?, 1, 0.0, 0.0)
-            """, (emp_id, name, base_loc, work_date_str, now_ts_str, cam_id, cam_loc, snapshot_path,
-                  cam_loc, visited_str, now_ts_str))
-
-            print(f"\n[FIRST CHECK-IN] {name} ({emp_id}) at {cam_loc} ({cam_id}) | {now_ts_str}")
-
-            email_payload = {
-                "email": email,
-                "person_name": name,
-                "employee_id": emp_id,
-                "event_title": "FIRST CHECK-IN",
-                "event_type": "IN",
-                "event_time": now_ts_str,
-                "camera_id": cam_id,
-                "camera_location": cam_loc,
-                "first_check_in": now_ts_str,
-                "first_check_in_location": cam_loc,
-                "last_check_out": None,
-                "visited_locations": visited_str,
-                "total_checks": 1,
-                "out_of_office_hours": 0.0,
-                "total_working_hours": 0.0,
-                "snapshot_path": snapshot_path
-            }
+    try:
+        cursor = conn.cursor()
+    
+        cursor.execute("""
+            SELECT * FROM daily_attendance
+            WHERE employee_id = ? AND work_date = ?
+        """, (emp_id, work_date_str))
+        summary = cursor.fetchone()
+    
+        email_payload = None
+        snapshot_path = None
+    
+        # ==========================================================
+        # CASE 1: NO RECORD TODAY YET
+        # ==========================================================
+        if not summary:
+            if cam_role == "IN":
+                snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "FIRST_IN")
+                visited_str = cam_loc
+    
+                cursor.execute("""
+                    INSERT INTO daily_attendance (
+                        employee_id, person_name, base_location, work_date,
+                        first_check_in, first_check_in_camera, first_check_in_location, first_check_in_image,
+                        current_status, current_location, visited_locations,
+                        last_event_time, total_checks, out_of_office_hours, total_working_hours
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'IN', ?, ?, ?, 1, 0.0, 0.0)
+                """, (emp_id, name, base_loc, work_date_str, now_ts_str, cam_id, cam_loc, snapshot_path,
+                      cam_loc, visited_str, now_ts_str))
+    
+                print(f"\n[FIRST CHECK-IN] {name} ({emp_id}) at {cam_loc} ({cam_id}) | {now_ts_str}")
+    
+                email_payload = {
+                    "email": email,
+                    "person_name": name,
+                    "employee_id": emp_id,
+                    "event_title": "FIRST CHECK-IN",
+                    "event_type": "IN",
+                    "event_time": now_ts_str,
+                    "camera_id": cam_id,
+                    "camera_location": cam_loc,
+                    "first_check_in": now_ts_str,
+                    "first_check_in_location": cam_loc,
+                    "last_check_out": None,
+                    "visited_locations": visited_str,
+                    "total_checks": 1,
+                    "out_of_office_hours": 0.0,
+                    "total_working_hours": 0.0,
+                    "snapshot_path": snapshot_path
+                }
+            else:
+                # Employee walked past OUT camera without checking IN first today
+                snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "UNMATCHED_OUT")
+                visited_str = cam_loc
+                cursor.execute("""
+                    INSERT INTO daily_attendance (
+                        employee_id, person_name, base_location, work_date,
+                        last_check_out, last_check_out_camera, last_check_out_location, last_check_out_image,
+                        current_status, current_location, visited_locations,
+                        last_event_time, total_checks, out_of_office_hours, total_working_hours
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OUT', ?, ?, ?, 1, 0.0, 0.0)
+                """, (emp_id, name, base_loc, work_date_str, now_ts_str, cam_id, cam_loc, snapshot_path,
+                      cam_loc, visited_str, now_ts_str))
+    
+                print(f"\n[CHECK-OUT (NO PRIOR IN)] {name} ({emp_id}) at {cam_loc} ({cam_id}) | {now_ts_str}")
+    
+                email_payload = {
+                    "email": email,
+                    "person_name": name,
+                    "employee_id": emp_id,
+                    "event_title": "CHECK-OUT",
+                    "event_type": "OUT",
+                    "event_time": now_ts_str,
+                    "camera_id": cam_id,
+                    "camera_location": cam_loc,
+                    "first_check_in": "Not Recorded",
+                    "first_check_in_location": "-",
+                    "last_check_out": f"{now_ts_str} ({cam_loc})",
+                    "visited_locations": visited_str,
+                    "total_checks": 1,
+                    "out_of_office_hours": 0.0,
+                    "total_working_hours": 0.0,
+                    "snapshot_path": snapshot_path
+                }
+    
+        # ==========================================================
+        # CASE 2: RECORD ALREADY EXISTS FOR TODAY
+        # ==========================================================
         else:
-            # Employee walked past OUT camera without checking IN first today
-            snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "UNMATCHED_OUT")
-            visited_str = cam_loc
-            cursor.execute("""
-                INSERT INTO daily_attendance (
-                    employee_id, person_name, base_location, work_date,
-                    last_check_out, last_check_out_camera, last_check_out_location, last_check_out_image,
-                    current_status, current_location, visited_locations,
-                    last_event_time, total_checks, out_of_office_hours, total_working_hours
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OUT', ?, ?, ?, 1, 0.0, 0.0)
-            """, (emp_id, name, base_loc, work_date_str, now_ts_str, cam_id, cam_loc, snapshot_path,
-                  cam_loc, visited_str, now_ts_str))
+            prev_status = summary["current_status"]
+            last_time_dt = datetime.strptime(summary["last_event_time"], "%Y-%m-%d %H:%M:%S")
+            delta_hours = max(0.0, (now_dt - last_time_dt).total_seconds() / 3600.0)
+    
+            total_checks = summary["total_checks"] + 1
+            work_hrs = float(summary["total_working_hours"])
+            ooo_hrs = float(summary["out_of_office_hours"])
+    
+            # Update visited_locations breadcrumb if roaming to a new site
+            visited_list = [loc.strip() for loc in (summary["visited_locations"] or "").split("->") if loc.strip()]
+            if not visited_list or visited_list[-1] != cam_loc:
+                visited_list.append(cam_loc)
+            visited_str = " -> ".join(visited_list)
+    
+            if cam_role == "OUT":
+                # ----------------------------------------------------
+                # CHECK-OUT CAMERA TRIGGERED
+                # ----------------------------------------------------
+                snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "LAST_OUT")
+    
+                if prev_status == "IN":
+                    work_hrs = round(work_hrs + delta_hours, 4)
+    
+                cursor.execute("""
+                    UPDATE daily_attendance SET
+                        last_check_out = ?,
+                        last_check_out_camera = ?,
+                        last_check_out_location = ?,
+                        last_check_out_image = ?,
+                        current_status = 'OUT',
+                        current_location = ?,
+                        visited_locations = ?,
+                        last_event_time = ?,
+                        total_checks = ?,
+                        total_working_hours = ?
+                    WHERE employee_id = ? AND work_date = ?
+                """, (now_ts_str, cam_id, cam_loc, snapshot_path, cam_loc, visited_str,
+                      now_ts_str, total_checks, work_hrs, emp_id, work_date_str))
+    
+                print(f"\n[CHECK-OUT] {name} ({emp_id}) exited at {cam_loc} ({cam_id}) | Total Work: {work_hrs:.2f} hrs")
+    
+                # ALWAYS trigger email on every OUT event
+                email_payload = {
+                    "email": email,
+                    "person_name": name,
+                    "employee_id": emp_id,
+                    "event_title": "CHECK-OUT",
+                    "event_type": "OUT",
+                    "event_time": now_ts_str,
+                    "camera_id": cam_id,
+                    "camera_location": cam_loc,
+                    "first_check_in": summary["first_check_in"] or "Not Recorded",
+                    "first_check_in_location": summary["first_check_in_location"] or "-",
+                    "last_check_out": f"{now_ts_str} ({cam_loc})",
+                    "visited_locations": visited_str,
+                    "total_checks": total_checks,
+                    "out_of_office_hours": ooo_hrs,
+                    "total_working_hours": work_hrs,
+                    "snapshot_path": snapshot_path
+                }
+    
+            elif cam_role == "IN":
+                # ----------------------------------------------------
+                # CHECK-IN CAMERA TRIGGERED (RE-ENTRY OR TERMINAL VISIT)
+                # ----------------------------------------------------
+                snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "RE_IN")
+    
+                if prev_status == "OUT":
+                    ooo_hrs = round(ooo_hrs + delta_hours, 4)
+    
+                # Backfill first_check_in only if their very first punch today was an unmatched OUT
+                first_in = summary["first_check_in"] or now_ts_str
+                first_in_cam = summary["first_check_in_camera"] or cam_id
+                first_in_loc = summary["first_check_in_location"] or cam_loc
+                first_in_img = summary["first_check_in_image"] or snapshot_path
+    
+                cursor.execute("""
+                    UPDATE daily_attendance SET
+                        first_check_in = ?,
+                        first_check_in_camera = ?,
+                        first_check_in_location = ?,
+                        first_check_in_image = ?,
+                        current_status = 'IN',
+                        current_location = ?,
+                        visited_locations = ?,
+                        last_event_time = ?,
+                        total_checks = ?,
+                        out_of_office_hours = ?
+                    WHERE employee_id = ? AND work_date = ?
+                """, (first_in, first_in_cam, first_in_loc, first_in_img, cam_loc, visited_str,
+                      now_ts_str, total_checks, ooo_hrs, emp_id, work_date_str))
+    
+                print(f"\n[RE-ENTRY IN] {name} ({emp_id}) entered {cam_loc} ({cam_id}) | Out-of-Office: {ooo_hrs:.2f} hrs")
+                # Note: No email on intermediate re-entries; only on First IN and Every OUT.
+    
+        # Always append to immutable attendance_logs table
+        cursor.execute("""
+            INSERT INTO attendance_logs (
+                employee_id, person_name, camera_id, camera_location,
+                work_date, event_type, event_timestamp, confidence_score, snapshot_image
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (emp_id, name, cam_id, cam_loc, work_date_str, cam_role, now_ts_str, round(confidence, 4), snapshot_path))
+    
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
-            print(f"\n[CHECK-OUT (NO PRIOR IN)] {name} ({emp_id}) at {cam_loc} ({cam_id}) | {now_ts_str}")
-
-            email_payload = {
-                "email": email,
-                "person_name": name,
-                "employee_id": emp_id,
-                "event_title": "CHECK-OUT",
-                "event_type": "OUT",
-                "event_time": now_ts_str,
-                "camera_id": cam_id,
-                "camera_location": cam_loc,
-                "first_check_in": "Not Recorded",
-                "first_check_in_location": "-",
-                "last_check_out": f"{now_ts_str} ({cam_loc})",
-                "visited_locations": visited_str,
-                "total_checks": 1,
-                "out_of_office_hours": 0.0,
-                "total_working_hours": 0.0,
-                "snapshot_path": snapshot_path
-            }
-
-    # ==========================================================
-    # CASE 2: RECORD ALREADY EXISTS FOR TODAY
-    # ==========================================================
-    else:
-        prev_status = summary["current_status"]
-        last_time_dt = datetime.strptime(summary["last_event_time"], "%Y-%m-%d %H:%M:%S")
-        delta_hours = max(0.0, (now_dt - last_time_dt).total_seconds() / 3600.0)
-
-        total_checks = summary["total_checks"] + 1
-        work_hrs = float(summary["total_working_hours"])
-        ooo_hrs = float(summary["out_of_office_hours"])
-
-        # Update visited_locations breadcrumb if roaming to a new site
-        visited_list = [loc.strip() for loc in (summary["visited_locations"] or "").split("->") if loc.strip()]
-        if not visited_list or visited_list[-1] != cam_loc:
-            visited_list.append(cam_loc)
-        visited_str = " -> ".join(visited_list)
-
-        if cam_role == "OUT":
-            # ----------------------------------------------------
-            # CHECK-OUT CAMERA TRIGGERED
-            # ----------------------------------------------------
-            snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "LAST_OUT")
-
-            if prev_status == "IN":
-                work_hrs = round(work_hrs + delta_hours, 4)
-
-            cursor.execute("""
-                UPDATE daily_attendance SET
-                    last_check_out = ?,
-                    last_check_out_camera = ?,
-                    last_check_out_location = ?,
-                    last_check_out_image = ?,
-                    current_status = 'OUT',
-                    current_location = ?,
-                    visited_locations = ?,
-                    last_event_time = ?,
-                    total_checks = ?,
-                    total_working_hours = ?
-                WHERE employee_id = ? AND work_date = ?
-            """, (now_ts_str, cam_id, cam_loc, snapshot_path, cam_loc, visited_str,
-                  now_ts_str, total_checks, work_hrs, emp_id, work_date_str))
-
-            print(f"\n[CHECK-OUT] {name} ({emp_id}) exited at {cam_loc} ({cam_id}) | Total Work: {work_hrs:.2f} hrs")
-
-            # ALWAYS trigger email on every OUT event
-            email_payload = {
-                "email": email,
-                "person_name": name,
-                "employee_id": emp_id,
-                "event_title": "CHECK-OUT",
-                "event_type": "OUT",
-                "event_time": now_ts_str,
-                "camera_id": cam_id,
-                "camera_location": cam_loc,
-                "first_check_in": summary["first_check_in"] or "Not Recorded",
-                "first_check_in_location": summary["first_check_in_location"] or "-",
-                "last_check_out": f"{now_ts_str} ({cam_loc})",
-                "visited_locations": visited_str,
-                "total_checks": total_checks,
-                "out_of_office_hours": ooo_hrs,
-                "total_working_hours": work_hrs,
-                "snapshot_path": snapshot_path
-            }
-
-        elif cam_role == "IN":
-            # ----------------------------------------------------
-            # CHECK-IN CAMERA TRIGGERED (RE-ENTRY OR TERMINAL VISIT)
-            # ----------------------------------------------------
-            snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "RE_IN")
-
-            if prev_status == "OUT":
-                ooo_hrs = round(ooo_hrs + delta_hours, 4)
-
-            # Backfill first_check_in only if their very first punch today was an unmatched OUT
-            first_in = summary["first_check_in"] or now_ts_str
-            first_in_cam = summary["first_check_in_camera"] or cam_id
-            first_in_loc = summary["first_check_in_location"] or cam_loc
-            first_in_img = summary["first_check_in_image"] or snapshot_path
-
-            cursor.execute("""
-                UPDATE daily_attendance SET
-                    first_check_in = ?,
-                    first_check_in_camera = ?,
-                    first_check_in_location = ?,
-                    first_check_in_image = ?,
-                    current_status = 'IN',
-                    current_location = ?,
-                    visited_locations = ?,
-                    last_event_time = ?,
-                    total_checks = ?,
-                    out_of_office_hours = ?
-                WHERE employee_id = ? AND work_date = ?
-            """, (first_in, first_in_cam, first_in_loc, first_in_img, cam_loc, visited_str,
-                  now_ts_str, total_checks, ooo_hrs, emp_id, work_date_str))
-
-            print(f"\n[RE-ENTRY IN] {name} ({emp_id}) entered {cam_loc} ({cam_id}) | Out-of-Office: {ooo_hrs:.2f} hrs")
-            # Note: No email on intermediate re-entries; only on First IN and Every OUT.
-
-    # Always append to immutable attendance_logs table
-    cursor.execute("""
-        INSERT INTO attendance_logs (
-            employee_id, person_name, camera_id, camera_location,
-            work_date, event_type, event_timestamp, confidence_score, snapshot_image
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (emp_id, name, cam_id, cam_loc, work_date_str, cam_role, now_ts_str, round(confidence, 4), snapshot_path))
-
-    conn.commit()
-    conn.close()
-
+    print(f"[EVENTS] committed employee={emp_id} camera={cam_id} role={cam_role} at={now_ts_str}", flush=True)
     if email_payload:
-        send_attendance_email_async(email_payload)
-
+        try:
+            send_attendance_email_async(email_payload)
+        except Exception as exc:
+            # A notification failure must never make a successfully committed
+            # punch look like a database failure or trigger a duplicate write.
+            print(f"[EMAIL] scheduling failed after committed punch: {type(exc).__name__}: {exc}", flush=True)
 
 class EventWriter(threading.Thread):
     """Records punches (SQL + snapshot + email) off the inference thread, so recognition never waits on the DB."""
