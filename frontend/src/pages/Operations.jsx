@@ -9,7 +9,6 @@ const headings = {
   reports: ["Daily Attendance Report", "Shift-aware roster, punch status and downloadable CSV"],
   visitors: ["Visitor Management", "Register arrivals and record departures"],
   shifts: ["Shift Management", "Manage work shifts and employee assignments"],
-  areas: ["Area Selection", "Define monitored zones for your office locations"],
 };
 const schemas = {
   visitors: [
@@ -25,21 +24,15 @@ const schemas = {
     ["end_time", "End time", "time", true],
     ["grace_minutes", "Grace period (minutes)", "number"],
   ],
-  areas: [
-    ["name", "Area name", "text", true],
-    ["location", "Location", "text", true],
-    ["description", "Description"],
-  ],
+
 };
 const initial = {
   visitors: { full_name: "", organization: "", host_employee_id: "", purpose: "", location: "" },
   shifts: { shift_name: "", start_time: "09:00", end_time: "18:00", grace_minutes: 15 },
-  areas: { name: "", location: "", description: "" },
 };
 const columns = {
   visitors: [["full_name", "Visitor"], ["organization", "Organization"], ["location", "Location"], ["checked_in_at", "Arrived"], ["checked_out_at", "Departed"]],
   shifts: [["shift_name", "Shift"], ["start_time", "Start"], ["end_time", "End"], ["grace_minutes", "Grace (min)"]],
-  areas: [["name", "Area"], ["location", "Location"], ["description", "Description"]],
 };
 const titleCase = s => String(s || "").toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 
@@ -113,7 +106,7 @@ export default function Operations({ mode }) {
     finally { setBusy(false); }
   };
 
-  const canCreate = ["visitors", "shifts", "areas"].includes(mode) && (role === "admin" || (role === "hr" && mode === "visitors"));
+  const canCreate = ["visitors", "shifts"].includes(mode) && (role === "admin" || (role === "hr" && mode === "visitors"));
   const [heading, subtitle] = headings[mode] || ["Operations", ""];
 
   return <div className="space-y-6">
