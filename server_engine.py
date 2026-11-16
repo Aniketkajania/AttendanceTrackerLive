@@ -1002,8 +1002,12 @@ class InferenceWorker(threading.Thread):
             return
         snapshot = []
         for t in tracker.tracks:
+            if now - t.last_seen > 0.6:
+                continue
             self._refresh_label(t, cam_role, now)
-            snapshot.append((t.bbox.copy(), t.vel.copy(), t.last_seen, t.color, t.label))
+            # Use the last measured bbox; predicted velocity can create
+            # floating rectangles when detections are small or intermittent.
+            snapshot.append((t.bbox.copy(), np.zeros(4, np.float32), t.last_seen, t.color, t.label))
         with self.overlay_lock:
             self.overlays[cid] = (time.time(), snapshot)
 
@@ -1031,12 +1035,12 @@ class InferenceWorker(threading.Thread):
                          f"face_px={m.get('px')} sharp={m.get('sharp', 0):.1f} "
                          f"yaw={m.get('yaw', 0):.2f} detector_score={m.get('score', 0):.3f}")
             if track.confirmed_id is None:
-                track.label, track.color = "Unknown", (0, 0, 255)
+                track.label, track.color = reason, (0, 165, 255)
             return
 
         if not len(users):
             self._reject(cam_cfg["camera_id"], "no_active_enrollments", track, now)
-            track.label, track.color = "Unknown", (0, 0, 255)
+            track.label, track.color = "No Enrollments", (0, 165, 255)
             return
 
         embed_start = time.perf_counter()
@@ -1109,7 +1113,7 @@ class InferenceWorker(threading.Thread):
         elif matched:
             self._reject(cam_cfg["camera_id"], "waiting_for_confirmation", track, now,
                          f"votes={cnt}/{CONFIRM_VOTES} score={s1:.3f}")
-            track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
+            track.label, track.color = f"Checking ({cnt}/{CONFIRM_VOTES})", (0, 220, 255)
         else:
             track.label, track.color = f"Unknown ({s1:.2f})", (0, 0, 255)
 
