@@ -371,11 +371,18 @@ def camera_metrics(camera_id: str):
 # ---------- Native WebRTC (WHEP) Endpoint ----------
 pcs = set()
 import threading
+from fractions import Fraction
 from aiortc import VideoStreamTrack
 from av import VideoFrame
 
 # Global registry for resilient camera threads
 CAM_WORKERS = {}
+CAM_WORKERS_LOCK = threading.Lock()
+PREVIEW_MAX_WIDTH = max(320, min(1280, int(os.getenv("PREVIEW_MAX_WIDTH", "640"))))
+PREVIEW_FPS = max(2, min(15, int(os.getenv("PREVIEW_FPS", "10"))))
+PREVIEW_IDLE_SECONDS = max(15, int(os.getenv("PREVIEW_IDLE_SECONDS", "30")))
+# Optional explicit substream path (only enable if all configured cameras support it).
+PREVIEW_RTSP_PATH = os.getenv("PREVIEW_RTSP_PATH", "").strip()
 
 class CameraWorker:
     def __init__(self, camera_config: dict):
@@ -385,6 +392,10 @@ class CameraWorker:
         self.frame_ts = 0.0
         self.frames_captured = 0
         self.started_at = time.monotonic()
+        self.last_requested = time.monotonic()
+        self.reconnects = 0
+        self.last_error = ""
+        self.status = "connecting"
         self.running = True
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -400,7 +411,7 @@ class CameraWorker:
             port = self.config.get("port") or 554
             user = self.config.get("username") or ""
             pwd = self.config.get("password") or ""
-            path = self.config.get("rtsp_path") or ""
+            path = PREVIEW_RTSP_PATH or self.config.get("rtsp_path") or ""
             if path and not path.startswith("/"):
                 path = "/" + path
             src = f"rtsp://{user}:{pwd}@{ip}:{port}{path}" if user and pwd else f"rtsp://{ip}:{port}{path}"
@@ -410,68 +421,102 @@ class CameraWorker:
         return cap
 
     def _capture_loop(self):
-        cap = self._open_capture()
+        cap = None
         failures = 0
-
+        last_retrieve = 0.0
         while self.running:
+            if time.monotonic() - self.last_requested > PREVIEW_IDLE_SECONDS:
+                self.running = False
+                break
+            if cap is None:
+                try:
+                    cap = self._open_capture()
+                    if not cap.isOpened():
+                        self.last_error = "Unable to open camera stream"
+                        self.status = "reconnecting"
+                        cap.release()
+                        cap = None
+                        time.sleep(1)
+                        continue
+                except Exception as exc:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    self.status = "reconnecting"
+                    time.sleep(1)
+                    continue
             if not cap.grab():
                 failures += 1
                 time.sleep(0.02)
                 if failures >= 50:  # Auto-reconnect on stream drop
+                    self.status = "reconnecting"
+                    self.last_error = "No frames received; reconnecting"
+                    self.reconnects += 1
                     cap.release()
-                    time.sleep(0.5)
-                    cap = self._open_capture()
+                    cap = None
                     failures = 0
                 continue
 
             failures = 0
+            tick = time.monotonic()
+            if tick - last_retrieve < 1.0 / PREVIEW_FPS:
+                continue
+            last_retrieve = tick
             success, frame = cap.retrieve()
             if success and frame is not None:
-                # Resize if > 720p to save WebRTC bandwidth
                 h, w = frame.shape[:2]
-                if w > 960:
-                    frame = cv2.resize(frame, (960, int(h * 960 / w)), interpolation=cv2.INTER_AREA)
+                if w > PREVIEW_MAX_WIDTH:
+                    frame = cv2.resize(frame, (PREVIEW_MAX_WIDTH, int(h * PREVIEW_MAX_WIDTH / w)), interpolation=cv2.INTER_AREA)
                 
                 with self.lock:
                     self.latest_frame = frame
                     self.frame_ts = time.monotonic()
                     self.frames_captured += 1
+                    self.status = "connected"
+                    self.last_error = ""
             # cap.grab() already blocks for live stream frames; an additional fixed
             # sleep causes buffering and increases latency on busy camera servers.
 
-        cap.release()
+        if cap is not None:
+            cap.release()
+        self.status = "idle"
 
     def get_frame(self):
         with self.lock:
+            self.last_requested = time.monotonic()
             return self.latest_frame.copy() if self.latest_frame is not None else None
 
     def metrics(self):
         with self.lock:
             age = (time.monotonic() - self.frame_ts) if self.frame_ts else None
-            return {"camera_id": self.camera_id, "connected": age is not None and age < 5,
+            return {"camera_id": self.camera_id, "connected": self.running and age is not None and age < 5,
+                    "status": self.status, "reconnects": self.reconnects,
+                    "last_error": self.last_error,
                     "frame_age_ms": round(age * 1000) if age is not None else None,
                     "capture_fps_average": round(self.frames_captured / max(.001, time.monotonic() - self.started_at), 1)}
 
 
 class ResilientVideoStreamTrack(VideoStreamTrack):
-    """A custom WebRTC track that pulls frames from the robust OpenCV worker"""
+    """Send only PREVIEW_FPS frames; never hold an RTSP worker waiting for clients."""
     def __init__(self, worker: CameraWorker):
         super().__init__()
         self.worker = worker
+        self.started = time.monotonic()
+        self.next_frame_at = self.started
 
     async def recv(self):
-        pts, time_base = await self.next_timestamp()
-        
-        # Non-blocking wait for the next frame
+        # Keep wall previews light; timestamps reflect real elapsed wall time.
+        delay = self.next_frame_at - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        self.next_frame_at = max(self.next_frame_at + 1.0 / PREVIEW_FPS,
+                                 time.monotonic())
         frame = self.worker.get_frame()
-        while frame is None:
-            await asyncio.sleep(0.01)
-            frame = self.worker.get_frame()
-
-        # Convert OpenCV BGR array to WebRTC VideoFrame
+        if frame is None:
+            # Do not block the first WebRTC frame indefinitely: a neutral waiting
+            # frame allows the browser to negotiate while the RTSP source connects.
+            frame = np.zeros((360, 640, 3), dtype=np.uint8)
         av_frame = VideoFrame.from_ndarray(frame, format="bgr24")
-        av_frame.pts = pts
-        av_frame.time_base = time_base
+        av_frame.pts = int((time.monotonic() - self.started) * 90000)
+        av_frame.time_base = Fraction(1, 90000)
         return av_frame
 
 
@@ -488,8 +533,10 @@ async def webrtc_offer(camera_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Camera offline or not found")
 
     # Start the persistent background thread if it isn't running
-    if camera_id not in CAM_WORKERS or not CAM_WORKERS[camera_id].running:
-        CAM_WORKERS[camera_id] = CameraWorker(dict(cam))
+    with CAM_WORKERS_LOCK:
+        if camera_id not in CAM_WORKERS or not CAM_WORKERS[camera_id].running:
+            CAM_WORKERS[camera_id] = CameraWorker(dict(cam))
+        worker = CAM_WORKERS[camera_id]
 
     offer_sdp = await request.body()
     offer = RTCSessionDescription(sdp=offer_sdp.decode("utf-8"), type="offer")
@@ -503,7 +550,7 @@ async def webrtc_offer(camera_id: str, request: Request):
             pcs.discard(pc)
 
     # Attach our custom resilient stream track
-    video_track = ResilientVideoStreamTrack(CAM_WORKERS[camera_id])
+    video_track = ResilientVideoStreamTrack(worker)
     pc.addTrack(video_track)
 
     await pc.setRemoteDescription(offer)
