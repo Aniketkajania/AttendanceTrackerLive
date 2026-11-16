@@ -17,6 +17,7 @@ import { Panel, inputCls, btnCls, btnSecondaryCls } from "../ui";
 // Each preview has a visible timeout and an independent retry button.
 function WebRTCPlayer({ streamUrl }) {
   const videoRef = useRef(null);
+  const timeoutRef = useRef(null);
   const [attempt, setAttempt] = useState(0);
   const [status, setStatus] = useState("connecting");
   const [message, setMessage] = useState("");
@@ -33,6 +34,7 @@ function WebRTCPlayer({ streamUrl }) {
         pc.close();
       }
     }, 12000);
+    timeoutRef.current = timeout;
     setStatus("connecting");
     setMessage("");
     pc.addTransceiver("video", { direction: "recvonly" });
@@ -76,6 +78,7 @@ function WebRTCPlayer({ streamUrl }) {
     return () => {
       cancelled = true;
       window.clearTimeout(timeout);
+      timeoutRef.current = null;
       abort.abort();
       if (videoRef.current) videoRef.current.srcObject = null;
       pc.close();
@@ -85,7 +88,7 @@ function WebRTCPlayer({ streamUrl }) {
   return <div className="relative flex h-full w-full items-center justify-center">
     <video ref={videoRef} autoPlay muted playsInline
       className="max-h-full max-w-full object-contain"
-      onPlaying={() => { setStatus("playing"); setMessage(""); }}
+      onPlaying={() => { window.clearTimeout(timeoutRef.current); setStatus("playing"); setMessage(""); }}
       onError={() => { setStatus("error"); setMessage("Video playback failed."); }} />
     {status !== "playing" && <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-slate-950/90 p-4 text-center text-xs text-slate-200">
       {status === "connecting" ? <><Loader2 size={18} className="animate-spin" /> Connecting preview...</> :
