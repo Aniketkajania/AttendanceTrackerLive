@@ -131,6 +131,23 @@ export default function Cameras() {
   
   // Track which camera card is popped up in front
   const [expandedId, setExpandedId] = useState(null);
+  const [health, setHealth] = useState({});
+  useEffect(() => {
+    if (!activePreviews.length) return;
+    let stopped = false;
+    const check = async () => {
+      await Promise.all(activePreviews.map(async id => {
+        try {
+          const metrics = await api(`/api/cameras/${encodeURIComponent(id)}/metrics`);
+          if (!stopped) setHealth(prev => ({ ...prev, [id]: metrics }));
+        } catch { /* preview status still displayed by player */ }
+      }));
+    };
+    check();
+    const poll = window.setInterval(check, 5000);
+    return () => { stopped = true; window.clearInterval(poll); };
+  }, [activePreviews.join("|")]);
+
 
   const loadData = () => {
     setStreamKey(n => n + 1);
@@ -268,6 +285,7 @@ export default function Cameras() {
           const isRTSP = cam.connection_type === "RTSP";
           const isExpanded = expandedId === cam.camera_id;
           const previewActive = isLive && activePreviews.includes(cam.camera_id);
+          const metrics = health[cam.camera_id];
 
           return (
             <div
@@ -402,8 +420,8 @@ export default function Cameras() {
                     {isRTSP ? `rtsp://${cam.ip_address}:${cam.port}` : "USB Webcam (Local)"}
                   </span>
                   <span className="flex items-center gap-1 text-emerald-400 font-semibold">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    {previewActive ? "PREVIEW ACTIVE" : "PREVIEW PAUSED"}
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                    {previewActive ? (metrics?.connected ? "CAMERA CONNECTED" : "CONNECTING / OFFLINE") : "PREVIEW PAUSED"}
                   </span>
                 </div>
               </div>
@@ -420,7 +438,7 @@ export default function Cameras() {
                   {isRTSP ? cam.rtsp_path : `Device Index: ${cam.webcam_index}`}
                 </span>
                 <span className="flex items-center gap-1 font-semibold text-emerald-500">
-                  <CheckCircle2 size={11} /> 512-D Vision
+                  {previewActive && metrics ? `${metrics.frame_age_ms ?? "—"}ms age · ${metrics.reconnects ?? 0} reconnects` : "Preview on demand"}
                 </span>
               </div>
             </div>
