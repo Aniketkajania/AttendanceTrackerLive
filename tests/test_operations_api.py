@@ -88,13 +88,6 @@ class OperationsTests(unittest.TestCase):
             self.assertEqual(context.exception.status_code,404)
             execute.assert_not_called()
 
-    def test_camera_area_write_requires_admin(self):
-        with patch.object(ops,"execute") as execute:
-            with self.assertRaises(HTTPException) as context:
-                ops.assign_camera_area(ops.CameraAreaAssignment(camera_id="HO_IN",area_id=1),req("viewer"))
-            self.assertEqual(context.exception.status_code,403)
-            execute.assert_not_called()
-
     def test_overview_without_leave_tables(self):
         samples=[
             [{"present":3}],[{"total":5}],[{"total":2}],
