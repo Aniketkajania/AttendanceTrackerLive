@@ -365,7 +365,7 @@ def camera_metrics(camera_id: str):
     if not cam:
         raise HTTPException(404, "Camera not found")
     worker = CAM_WORKERS.get(camera_id)
-    return worker.metrics() if worker else {"camera_id":camera_id,"connected":False,"frame_age_ms":None,"capture_fps_average":0}
+    return worker.metrics() if worker else {"camera_id":camera_id,"connected":False,"status":"idle","reconnects":0,"frame_age_ms":None,"capture_fps_average":0}
 
 
 # ---------- Native WebRTC (WHEP) Endpoint ----------
@@ -415,7 +415,14 @@ class CameraWorker:
             if path and not path.startswith("/"):
                 path = "/" + path
             src = f"rtsp://{user}:{pwd}@{ip}:{port}{path}" if user and pwd else f"rtsp://{ip}:{port}{path}"
-            cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+            # RTSP read/open timeouts; older OpenCV builds may not support them.
+            try:
+                cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG, [
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
+                ])
+            except (TypeError, cv2.error, AttributeError):
+                cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
         
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return cap
