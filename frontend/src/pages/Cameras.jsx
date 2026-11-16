@@ -87,7 +87,7 @@ function WebRTCPlayer({ streamUrl }) {
 
   return <div className="relative flex h-full w-full items-center justify-center">
     <video ref={videoRef} autoPlay muted playsInline
-      className="max-h-full max-w-full object-contain"
+      className="h-full w-full object-contain"
       onPlaying={() => { window.clearTimeout(timeoutRef.current); setStatus("playing"); setMessage(""); }}
       onError={() => { setStatus("error"); setMessage("Video playback failed."); }} />
     {status !== "playing" && <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-slate-950/90 p-4 text-center text-xs text-slate-200">
@@ -335,7 +335,7 @@ export default function Cameras() {
               }}
               className={`group flex flex-col justify-between overflow-hidden rounded-xl border transition-all select-none ${
                 isExpanded
-                  ? "fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[90vw] max-w-2xl max-h-[75vh] shadow-2xl border-slate-700 bg-slate-900"
+                  ? "fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[96vw] max-w-[1600px] max-h-[94vh] shadow-2xl border-slate-700 bg-slate-900"
                   : "relative cursor-pointer border-slate-200 bg-white shadow-2xs hover:border-blue-400 hover:shadow-md"
               }`}
             >
@@ -417,7 +417,7 @@ export default function Cameras() {
               {/* Single Shared Video Frame */}
               <div
                 className={`relative w-full bg-slate-950 flex items-center justify-center overflow-hidden [transform:translateZ(0)] ${
-                  isExpanded ? "max-h-[50vh] aspect-video" : "aspect-video"
+                  isExpanded ? "h-[min(82vh,calc(96vw*9/16))] min-h-0" : "aspect-video"
                 }`}
               >
                 {previewActive && <WebRTCPlayer
