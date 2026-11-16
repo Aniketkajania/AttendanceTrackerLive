@@ -39,12 +39,12 @@ def readiness(request: Request):
     """
     permitted(request, ("admin",))
     needed = ["attendance_shifts", "employee_shifts", "attendance_areas",
-              "attendance_visitors", "attendance_camera_areas"]
+              "attendance_visitors"]
     rows = query("""
         SELECT name FROM sys.tables
         WHERE schema_id=SCHEMA_ID('dbo')
           AND name IN ('attendance_shifts','employee_shifts','attendance_areas',
-                       'attendance_visitors','attendance_camera_areas')
+                       'attendance_visitors')
     """)
     found = {r["name"] for r in rows}
     missing = [name for name in needed if name not in found]
@@ -247,37 +247,6 @@ def daily_report_csv(request: Request, work_date: date, location: Optional[str] 
 
 
 # ---------- area assignment ----------
-class CameraAreaAssignment(BaseModel):
-    camera_id: str = Field(min_length=1,max_length=50)
-    area_id: int = Field(ge=1)
-
-
-@router.get("/camera-areas")
-def camera_areas(request: Request):
-    permitted(request, ("admin","hr","viewer"))
-    return query("""
-        SELECT c.camera_id,c.camera_name,c.location,c.camera_role,
-               ca.area_id,a.name AS area_name
-        FROM dbo.cameras c
-        LEFT JOIN dbo.attendance_camera_areas ca ON ca.camera_id=c.camera_id
-        LEFT JOIN dbo.attendance_areas a ON a.id=ca.area_id
-        WHERE c.is_active=1 ORDER BY c.location,c.camera_name
-    """)
-
-
-@router.post("/camera-areas")
-def assign_camera_area(item: CameraAreaAssignment, request: Request):
-    permitted(request, ("admin",))
-    if not exists("cameras","camera_id",item.camera_id) or not exists("attendance_areas","id",item.area_id):
-        raise HTTPException(404,"Camera or area not found")
-    execute("""
-        UPDATE dbo.attendance_camera_areas SET area_id=?,assigned_at=SYSDATETIME()
-        WHERE camera_id=?;
-        IF @@ROWCOUNT=0 INSERT INTO dbo.attendance_camera_areas(camera_id,area_id) VALUES (?,?)
-    """,(item.area_id,item.camera_id,item.camera_id,item.area_id))
-    return {"ok":True}
-
-
 @router.get("/analytics/activity")
 def attendance_activity(request: Request, work_date: date):
     """Verified punch activity, NOT anonymous people counting or camera footfall."""
