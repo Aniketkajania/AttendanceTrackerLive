@@ -861,6 +861,8 @@ class InferenceWorker(threading.Thread):
         self.stats = {}                   # camera_id -> {"seen", "scanned", "ms"}
         self.timing = {}
         self.recognition_stats = {}
+        self.rejection_stats = {}
+        self.rejection_log_at = {}
         self.running = True
 
     # ---------- preview side ----------
@@ -989,6 +991,18 @@ class InferenceWorker(threading.Thread):
         with self.overlay_lock:
             self.overlays[cid] = (time.time(), snapshot)
 
+    def _reject(self, cid, reason, track, now, detail=""):
+        """Report why a visible face was not confirmed, without storing images."""
+        counts = self.rejection_stats.setdefault(cid, {})
+        counts[reason] = counts.get(reason, 0) + 1
+        key = (cid, track.id, reason)
+        if now - self.rejection_log_at.get(key, 0) >= 10:
+            self.rejection_log_at[key] = now
+            print(f"[MATCH_REJECT] camera={cid} track={track.id} reason={reason} {detail}", flush=True)
+        if len(self.rejection_log_at) > 2000:
+            cutoff = now - 30
+            self.rejection_log_at = {k: t for k, t in self.rejection_log_at.items() if t >= cutoff}
+
     # ---------- identity for one tracked face ----------
     def _process(self, track, det, frame, cam_cfg, users, matrix, now):
         # confirmed and checked recently: nothing to do (skip even the quality check)
@@ -997,11 +1011,15 @@ class InferenceWorker(threading.Thread):
 
         ok, reason, m, q = self.finder.assess(frame, det["bbox"], det["kps"], det["score"])
         if not ok:
+            self._reject(cam_cfg["camera_id"], "quality_" + reason.lower().replace(" ", "_"), track, now,
+                         f"face_px={m.get('px')} sharp={m.get('sharp', 0):.1f} "
+                         f"yaw={m.get('yaw', 0):.2f} detector_score={m.get('score', 0):.3f}")
             if track.confirmed_id is None:
                 track.label, track.color = "Unknown", (0, 0, 255)
             return
 
         if not len(users):
+            self._reject(cam_cfg["camera_id"], "no_active_enrollments", track, now)
             track.label, track.color = "Unknown", (0, 0, 255)
             return
 
@@ -1027,6 +1045,11 @@ class InferenceWorker(threading.Thread):
         best = users[int(order[0])]
         margin_ok = (len(order) < 2) or ((s1 - s2) >= MATCH_MARGIN)
         matched = (s1 >= SIMILARITY_THRESHOLD) and margin_ok
+        if not matched:
+            why = "low_similarity" if s1 < SIMILARITY_THRESHOLD else "ambiguous_identity"
+            self._reject(cam_cfg["camera_id"], why, track, now,
+                         f"best_score={s1:.3f} second_score={s2:.3f} "
+                         f"threshold={SIMILARITY_THRESHOLD:.3f} margin={s1 - s2:.3f}")
 
         # ---- already confirmed: re-verification ----
         if track.confirmed_id is not None:
@@ -1068,6 +1091,8 @@ class InferenceWorker(threading.Thread):
             rec["total_ms"] += detected_to_confirm_ms
             track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
         elif matched:
+            self._reject(cam_cfg["camera_id"], "waiting_for_confirmation", track, now,
+                         f"votes={cnt}/{CONFIRM_VOTES} score={s1:.3f}")
             track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
         else:
             track.label, track.color = f"Unknown ({s1:.2f})", (0, 0, 255)
@@ -1192,6 +1217,8 @@ def main():
                 dt = now_epoch - last_stats
                 last_stats = now_epoch
                 st = worker.pop_stats()
+                rejected = worker.rejection_stats
+                worker.rejection_stats = {}
                 timing = worker.timing
                 worker.timing = {}
                 recognition_stats = worker.recognition_stats
@@ -1213,7 +1240,11 @@ def main():
                         f" | confirmed {confirmed_count} | avg detect-to-confirm {recognized['total_ms'] / confirmed_count:.0f}ms"
                         if confirmed_count else ""
                     )
-                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age | detect {detect_avg:.0f} ms | embed {embed_avg:.0f} ms ({tm.get('embeds', 0)} faces){confirmation_summary}")
+                    reasons = rejected.get(cid, {})
+                    rejection_summary = (" | rejections " + ",".join(
+                        f"{reason}:{count}" for reason, count in sorted(reasons.items())
+                    )) if reasons else ""
+                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age | detect {detect_avg:.0f} ms | embed {embed_avg:.0f} ms ({tm.get('embeds', 0)} faces){confirmation_summary}{rejection_summary}")
                 if parts:
                     print("[STATS] " + "   ||   ".join(parts))
 
