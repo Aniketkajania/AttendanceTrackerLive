@@ -554,8 +554,10 @@ async def webrtc_offer(camera_id: str, request: Request):
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        if pc.connectionState in ["failed", "closed"]:
+        if pc.connectionState in ("failed", "closed"):
             pcs.discard(pc)
+            if pc.connectionState != "closed":
+                await pc.close()
 
     # Attach our custom resilient stream track
     video_track = ResilientVideoStreamTrack(worker)
