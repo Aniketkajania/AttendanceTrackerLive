@@ -461,7 +461,7 @@ def save_gate_snapshot(frame, bbox, employee_id: str, location: str, tag: str) -
     return filepath
 
 
-def process_strict_in_out_event(user: dict, cam_config: dict, confidence: float, frame, bbox):
+def process_strict_in_out_event(user: dict, cam_config: dict, confidence: float, frame, bbox, event_epoch=None):
     """
     Processes a verified face against strict camera_role ('IN' or 'OUT'):
     - Triggers email on FIRST CHECK-IN of the day.
@@ -476,7 +476,9 @@ def process_strict_in_out_event(user: dict, cam_config: dict, confidence: float,
     cam_loc = cam_config["location"]
     cam_role = cam_config["camera_role"]  # Strictly 'IN' or 'OUT'
 
-    now_dt = datetime.now()
+    # Preserve the time the person was recognized even when the SQL writer
+    # is delayed by a busy database or other queued attendance events.
+    now_dt = datetime.fromtimestamp(event_epoch) if event_epoch is not None else datetime.now()
     work_date_str = now_dt.strftime("%Y-%m-%d")
     now_ts_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1116,7 +1118,7 @@ class InferenceWorker(threading.Thread):
             self.cooldown_tracker[key] = now
             track.recorded_at = now
             try:
-                self.events.put_nowait((user, dict(cam_cfg), score, frame, np.array(bbox, copy=True)))
+                self.events.put_nowait((user, dict(cam_cfg), score, frame, np.array(bbox, copy=True), now))
                 return True
             except queue.Full:
                 self.cooldown_tracker.pop(key, None)    # allow a retry on the next sighting
