@@ -13,7 +13,8 @@ After pulling this branch and restarting the **recognition engine in a controlle
 - `waiting_for_confirmation`: match is promising but a second observation is needed; if the employee leaves quickly, investigate scan rate and number of cameras competing for CPU
 - `no_active_enrollments`: engine has no active identities loaded. Check database connectivity and whether the employee is active.
 - `[RECOGNITION] ... attendance=queued`: recognition succeeded and was queued; **this does NOT mean SQL committed**
-- `[EVENTS] failed to record a punch`: SQL writing failed and requires investigation
+- `[EVENTS] committed ...`: SQL transaction was committed; recognition event time is retained even if writer processing was delayed
+- `[EVENTS] failed to record a punch`: SQL writing failed and requires investigation. The connection now rolls back and closes cleanly; failed punches are **not yet durably retried**.
 - `[STATS] ... scanned .../s | detect ...ms | embed ...ms | rejections ...`: 30-second aggregate statistics per camera
 
 Scores and image-quality measurements are diagnostics, not a substitute for validation on genuinely labeled employee images. Logs intentionally contain no face photos or embedding vectors.
@@ -31,5 +32,6 @@ Scores and image-quality measurements are diagnostics, not a substitute for vali
 ## Safeguards
 - Keep `SIMILARITY_THRESHOLD`, `MATCH_MARGIN`, `CONFIRM_VOTES` and `COOLDOWN_SECONDS` unchanged until actual rejection reasons are observed.
 - Never make an Unknown face automatically punch as the nearest employee.
+- SQL connection cleanup and timestamp preservation are reliability hardening, **not** a guarantee against lost events in outages. Durable retry plus idempotency is a separate stage.
 - Do not restart `AttendanceTrackerAPI` in place of the recognition engine: its startup is independent.
 - Continuous on-disk diagnostic retention may reveal sensitive behavioral patterns. Restrict access and retention of any redirected engine logs.
