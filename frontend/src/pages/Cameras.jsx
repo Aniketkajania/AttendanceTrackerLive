@@ -13,7 +13,7 @@ import {
 import { api } from "../api";
 import { Panel, inputCls, btnCls, btnSecondaryCls } from "../ui";
 
-// A camera is connected only when the operator explicitly opens its preview.
+// Visible cameras start automatically, with a bounded number of concurrent streams.
 // Each preview has a visible timeout and an independent retry button.
 function WebRTCPlayer({ streamUrl }) {
   const videoRef = useRef(null);
@@ -124,29 +124,16 @@ export default function Cameras() {
   
   // Force HTTP stream reconnects on refresh
   const [streamKey, setStreamKey] = useState(0);
-  const [activePreviews, setActivePreviews] = useState([]);
+  // Automatic viewport-aware preview scheduling. With many cameras, only the
+  // first two visible cards receive a live WebRTC session; scrolling switches
+  // streams without any per-camera clicks. Expansion has first priority.
   const MAX_PREVIEWS = 2;
-  const startPreview = (id) => setActivePreviews(old => [...old.filter(x => x !== id), id].slice(-MAX_PREVIEWS));
-  const stopPreview = (id) => setActivePreviews(old => old.filter(x => x !== id));
+  const cardNodes = useRef(new Map());
+  const [visibleCameraIds, setVisibleCameraIds] = useState([]);
+  const visibleIdSet = new Set(visibleCameraIds);
   
   // Track which camera card is popped up in front
   const [expandedId, setExpandedId] = useState(null);
-  const [health, setHealth] = useState({});
-  useEffect(() => {
-    if (!activePreviews.length) return;
-    let stopped = false;
-    const check = async () => {
-      await Promise.all(activePreviews.map(async id => {
-        try {
-          const metrics = await api(`/api/cameras/${encodeURIComponent(id)}/metrics`);
-          if (!stopped) setHealth(prev => ({ ...prev, [id]: metrics }));
-        } catch { /* preview status still displayed by player */ }
-      }));
-    };
-    check();
-    const poll = window.setInterval(check, 5000);
-    return () => { stopped = true; window.clearInterval(poll); };
-  }, [activePreviews.join("|")]);
 
 
   const loadData = () => {
@@ -179,6 +166,54 @@ export default function Cameras() {
     selectedLoc === "All"
       ? cameras
       : cameras.filter((c) => c.location === selectedLoc);
+
+  const visibleCandidateIds = filteredCameras
+    .filter(cam => Boolean(cam.is_active) && visibleIdSet.has(cam.camera_id))
+    .map(cam => cam.camera_id);
+  const activePreviews = expandedId
+    ? [expandedId, ...visibleCandidateIds.filter(id => id !== expandedId)].slice(0, MAX_PREVIEWS)
+    : visibleCandidateIds.slice(0, MAX_PREVIEWS);
+  const activePreviewKey = activePreviews.join("|");
+
+  useEffect(() => {
+    // The intersection observer keeps live streams attached only to on-screen
+    // camera cards, rather than all registered camera feeds.
+    const observer = new IntersectionObserver(entries => {
+      setVisibleCameraIds(previous => {
+        const next = new Set(previous);
+        for (const entry of entries) {
+          const id = entry.target.getAttribute("data-camera-id");
+          if (!id) continue;
+          if (entry.isIntersecting) next.add(id);
+          else next.delete(id);
+        }
+        const nextIds = [...next];
+        return nextIds.length === previous.length &&
+          nextIds.every((id, index) => id === previous[index]) ? previous : nextIds;
+      });
+    }, { root: null, rootMargin: "80px", threshold: 0.05 });
+    for (const node of cardNodes.current.values()) observer.observe(node);
+    return () => observer.disconnect();
+  }, [cameras, selectedLoc]);
+
+  const [health, setHealth] = useState({});
+  useEffect(() => {
+    if (!activePreviews.length) return;
+    let stopped = false;
+    const check = async () => {
+      await Promise.all(activePreviews.map(async id => {
+        try {
+          const metrics = await api(`/api/cameras/${encodeURIComponent(id)}/metrics`);
+          if (!stopped) setHealth(prev => ({ ...prev, [id]: metrics }));
+        } catch { /* preview status still displayed by player */ }
+      }));
+    };
+    check();
+    const poll = window.setInterval(check, 5000);
+    return () => { stopped = true; window.clearInterval(poll); };
+  }, [activePreviewKey]);
+
+
 
   const handleEdit = (e, cam) => {
     e.stopPropagation();
@@ -235,7 +270,7 @@ export default function Cameras() {
             Terminal Camera Wall & Stream Feeds
           </h1>
           <p className="text-[11px] text-slate-500">
-            Open up to two previews at once to keep the server responsive. Click a card to expand it.
+            Live previews start automatically as cameras enter view. Up to two play at once on this CPU server; click a card to expand.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -290,8 +325,13 @@ export default function Cameras() {
           return (
             <div
               key={cam.camera_id}
+              data-camera-id={cam.camera_id}
+              ref={node => {
+                if (node) cardNodes.current.set(cam.camera_id, node);
+                else cardNodes.current.delete(cam.camera_id);
+              }}
               onClick={() => {
-                if (!isExpanded) { setExpandedId(cam.camera_id); if (isLive) startPreview(cam.camera_id); }
+                if (!isExpanded) setExpandedId(cam.camera_id);
               }}
               className={`group flex flex-col justify-between overflow-hidden rounded-xl border transition-all select-none ${
                 isExpanded
@@ -328,7 +368,6 @@ export default function Cameras() {
                 </div>
 
                 <div className="flex items-center gap-1.5 pointer-events-auto">
-                  {previewActive && <button type="button" title="Stop preview" className="rounded px-2 py-1 text-[10px] font-semibold text-rose-500 hover:bg-rose-50" onClick={e => { e.stopPropagation(); stopPreview(cam.camera_id); }}>Stop</button>}
                   <span
                     className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold ${
                       isLive
@@ -362,7 +401,6 @@ export default function Cameras() {
                     onClick={(e) => {
                       e.stopPropagation();
                       setExpandedId(isExpanded ? null : cam.camera_id);
-                      if (!isExpanded && isLive) startPreview(cam.camera_id);
                     }}
                     title={isExpanded ? "Minimize" : "Expand"}
                     className={`rounded p-1 transition ${
@@ -388,9 +426,7 @@ export default function Cameras() {
                 />}
                 {isLive && !previewActive && <div className="flex flex-col items-center gap-2 text-center text-slate-300">
                   <Video size={24} />
-                  <span className="text-xs">Preview paused to save CPU</span>
-                  <button type="button" className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white pointer-events-auto"
-                    onClick={e => { e.stopPropagation(); startPreview(cam.camera_id); }}>Start live preview</button>
+                  <span className="text-xs">{visibleIdSet.has(cam.camera_id) ? "Preview queued — limited to two active streams" : "Preview starts automatically when visible"}</span>
                 </div>}
 
                 {/* Standby / Offline Fallback */}
@@ -405,15 +441,6 @@ export default function Cameras() {
                   </span>
                 </div>
 
-                {/* Hover prompt */}
-                {!isExpanded && (
-                  <div className="absolute inset-0 bg-slate-900/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
-                    <span className="inline-flex items-center gap-1.5 bg-blue-600 text-white text-[11px] font-semibold px-2.5 py-1 rounded-md shadow">
-                      <Maximize2 size={12} /> Click to expand
-                    </span>
-                  </div>
-                )}
-
                 {/* Overlay Tag */}
                 <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/80 via-black/30 to-transparent px-2.5 py-1 text-[9px] font-mono text-white pointer-events-none">
                   <span className="truncate max-w-[200px]">
@@ -421,7 +448,7 @@ export default function Cameras() {
                   </span>
                   <span className="flex items-center gap-1 text-emerald-400 font-semibold">
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    {previewActive ? (metrics?.connected ? "CAMERA CONNECTED" : "CONNECTING / OFFLINE") : "PREVIEW PAUSED"}
+                    {previewActive ? (metrics?.connected ? "CAMERA CONNECTED" : "CONNECTING / OFFLINE") : "AUTO PREVIEW"}
                   </span>
                 </div>
               </div>
