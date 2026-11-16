@@ -298,14 +298,18 @@ class Track:
     def update(self, bbox, now):
         bbox = np.asarray(bbox, np.float32)
         dt = max(now - self.last_seen, 1e-3)
-        self.vel = 0.5 * self.vel + 0.5 * (bbox - self.bbox) / dt
-        self.bbox = 0.6 * bbox + 0.4 * self.bbox      # light smoothing, removes jitter
+        # Clamp velocity so detector jitter cannot extrapolate bounding boxes
+        # far away from faces on slow camera scans.
+        v = (bbox - self.bbox) / dt
+        max_speed = 2.0 * max(float(bbox[2] - bbox[0]), float(bbox[3] - bbox[1]), 20.0)
+        self.vel = 0.5 * self.vel + 0.5 * np.clip(v, -max_speed, max_speed)
+        self.bbox = 0.75 * bbox + 0.25 * self.bbox     # reduce lag behind moving faces
         self.last_seen = now
         self.matched_now = True
 
     def display_box(self, now):
         missed = now - self.last_seen
-        return self.bbox + self.vel * min(missed, 0.4) if missed > 0 else self.bbox
+        return self.bbox + self.vel * min(missed, 0.12) if missed > 0 else self.bbox
 
     def fused_embedding(self):
         if not self.embs:
