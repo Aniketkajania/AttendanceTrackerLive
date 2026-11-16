@@ -56,8 +56,6 @@ export default function Operations({ mode }) {
   const [role, setRole] = useState("viewer");
   const [shifts, setShifts] = useState([]);
   const [assignments, setAssignments] = useState([]);
-  const [cameraAreas, setCameraAreas] = useState([]);
-  const [cameraAssignment, setCameraAssignment] = useState({ camera_id:"",area_id:"" });
   const [report, setReport] = useState(null);
   const [reportLocation, setReportLocation] = useState("");
   const [locations, setLocations] = useState([]);
@@ -77,9 +75,6 @@ export default function Operations({ mode }) {
       }
       else if (mode === "reports") setReport(data);
       else setRows(data);
-      if (mode === "areas") {
-        setCameraAreas(await api("/api/operations/camera-areas"));
-      }
       if (mode === "shifts") {
         const [a, me] = await Promise.all([api("/api/operations/assignments"), api("/api/auth/me")]);
         setAssignments(a);
@@ -217,26 +212,6 @@ export default function Operations({ mode }) {
           <button className={btnCls} disabled={busy}>Assign</button>
         </form>
         {assignments.length > 0 && <p className="mt-3 text-xs text-slate-500">{assignments.length} employee assignments configured</p>}
-      </Panel>}
-      {mode === "areas" && <Panel>
-        <h2 className="mb-3 font-bold text-slate-800">Camera Area Mapping</h2>
-        <p className="mb-4 text-xs text-slate-500">Assign existing cameras to an area. This records administrative configuration; it does not automatically change recognition behavior.</p>
-        {role==="admin" && <form className="mb-4 flex flex-wrap items-end gap-3" onSubmit={e=>{e.preventDefault(); act("/api/operations/camera-areas",{camera_id:cameraAssignment.camera_id,area_id:Number(cameraAssignment.area_id)});}}>
-          <label className="text-xs font-semibold text-slate-600">Camera
-            <select className={inputCls+" mt-1"} value={cameraAssignment.camera_id} required onChange={e=>setCameraAssignment(v=>({...v,camera_id:e.target.value}))}>
-              <option value="">Choose camera</option>
-              {cameraAreas.map(c=><option key={c.camera_id} value={c.camera_id}>{c.camera_name} ({c.camera_id})</option>)}
-            </select>
-          </label>
-          <label className="text-xs font-semibold text-slate-600">Area
-            <select className={inputCls+" mt-1"} value={cameraAssignment.area_id} required onChange={e=>setCameraAssignment(v=>({...v,area_id:e.target.value}))}>
-              <option value="">Choose area</option>
-              {rows.map(a=><option key={a.id} value={a.id}>{a.location}: {a.name}</option>)}
-            </select>
-          </label>
-          <button className={btnCls} disabled={busy}>Assign Camera</button>
-        </form>}
-        <div className="space-y-1">{cameraAreas.map(c=><div key={c.camera_id} className="flex justify-between gap-2 border-b border-slate-100 py-2 text-sm"><span>{c.camera_name} <span className="text-slate-400">({c.location})</span></span><span className="font-semibold">{c.area_name||"Unassigned"}</span></div>)}</div>
       </Panel>}
       <Panel className="overflow-x-auto">
         <table className="w-full min-w-[650px] text-left text-sm">
