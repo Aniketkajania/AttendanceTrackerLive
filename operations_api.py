@@ -38,13 +38,11 @@ def readiness(request: Request):
     This endpoint does not create tables or mutate attendance.
     """
     permitted(request, ("admin",))
-    needed = ["attendance_shifts", "employee_shifts", "attendance_areas",
-              "attendance_visitors"]
+    needed = ["attendance_shifts", "employee_shifts", "attendance_visitors"]
     rows = query("""
         SELECT name FROM sys.tables
         WHERE schema_id=SCHEMA_ID('dbo')
-          AND name IN ('attendance_shifts','employee_shifts','attendance_areas',
-                       'attendance_visitors')
+          AND name IN ('attendance_shifts','employee_shifts','attendance_visitors')
     """)
     found = {r["name"] for r in rows}
     missing = [name for name in needed if name not in found]
@@ -90,29 +88,6 @@ def assign_shift(item: ShiftAssignment, request: Request):
     execute("""UPDATE employee_shifts SET shift_id=? WHERE employee_id=?;
                IF @@ROWCOUNT=0 INSERT INTO employee_shifts(employee_id,shift_id) VALUES (?,?)""",
             (item.shift_id, item.employee_id, item.employee_id, item.shift_id))
-    return {"ok": True}
-
-
-class AreaIn(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-    location: str = Field(min_length=1, max_length=100)
-    description: str = Field(default="", max_length=300)
-
-
-@router.get("/areas")
-def areas(request: Request):
-    permitted(request, ("admin", "hr", "viewer"))
-    return query("SELECT id,name,location,description,is_active FROM attendance_areas ORDER BY location,name")
-
-
-@router.post("/areas", status_code=201)
-def create_area(item: AreaIn, request: Request):
-    permitted(request, ("admin",))
-    try:
-        execute("INSERT INTO attendance_areas(name,location,description) VALUES (?,?,?)",
-                (item.name.strip(), item.location.strip(), item.description.strip()))
-    except Exception as exc:
-        raise HTTPException(409, "Area name already exists") from exc
     return {"ok": True}
 
 
