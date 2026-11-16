@@ -56,19 +56,5 @@ BEGIN
   );
 END;
 
-IF OBJECT_ID(N'dbo.attendance_camera_areas', N'U') IS NULL
-BEGIN
-  CREATE TABLE dbo.attendance_camera_areas (
-    camera_id NVARCHAR(50) NOT NULL PRIMARY KEY,
-    area_id INT NOT NULL,
-    assigned_at DATETIME2(0) NOT NULL DEFAULT(SYSDATETIME()),
-    CONSTRAINT FK_attendance_camera_areas_camera FOREIGN KEY (camera_id) REFERENCES dbo.cameras(camera_id),
-    CONSTRAINT FK_attendance_camera_areas_area FOREIGN KEY (area_id) REFERENCES dbo.attendance_areas(id)
-  );
-END;
-
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID('dbo.attendance_camera_areas') AND name='IX_attendance_camera_areas_area')
-  CREATE INDEX IX_attendance_camera_areas_area ON dbo.attendance_camera_areas(area_id);
-
 COMMIT TRANSACTION;
 -- Deliberately does not create/drop leave requests or touch core attendance records.
