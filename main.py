@@ -510,10 +510,11 @@ class ResilientVideoStreamTrack(VideoStreamTrack):
         self.next_frame_at = max(self.next_frame_at + 1.0 / PREVIEW_FPS,
                                  time.monotonic())
         frame = self.worker.get_frame()
-        if frame is None:
-            # Do not block the first WebRTC frame indefinitely: a neutral waiting
-            # frame allows the browser to negotiate while the RTSP source connects.
-            frame = np.zeros((360, 640, 3), dtype=np.uint8)
+        # No synthetic black frame: the player shows "Connecting" until an actual
+        # camera frame is available. The browser owns the timeout/retry UI.
+        while frame is None:
+            await asyncio.sleep(0.1)
+            frame = self.worker.get_frame()
         av_frame = VideoFrame.from_ndarray(frame, format="bgr24")
         av_frame.pts = int((time.monotonic() - self.started) * 90000)
         av_frame.time_base = Fraction(1, 90000)
