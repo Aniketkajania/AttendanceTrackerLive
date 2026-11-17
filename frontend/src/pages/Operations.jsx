@@ -34,6 +34,12 @@ const columns = {
   visitors: [["full_name", "Visitor"], ["organization", "Organization"], ["location", "Location"], ["checked_in_at", "Arrived"], ["checked_out_at", "Departed"]],
   shifts: [["shift_name", "Shift"], ["start_time", "Start"], ["end_time", "End"], ["grace_minutes", "Grace (min)"]],
 };
+// Editable examples only: admins confirm actual company timings before saving.
+const shiftTemplates = [
+  { shift_name: "Morning", start_time: "06:00", end_time: "14:00", grace_minutes: 15 },
+  { shift_name: "General", start_time: "09:00", end_time: "18:00", grace_minutes: 15 },
+  { shift_name: "Night", start_time: "22:00", end_time: "06:00", grace_minutes: 15 },
+];
 const titleCase = s => String(s || "").toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 
 export default function Operations({ mode }) {
@@ -186,6 +192,12 @@ export default function Operations({ mode }) {
     </> : <>
       {showCreate && canCreate && <Panel>
         <h2 className="mb-4 text-lg font-bold text-slate-900">New {titleCase(mode.slice(0, -1))}</h2>
+        {mode === "shifts" && <>
+          <p className="mb-2 text-sm text-slate-600">Choose a starting template or enter your own shift name and timings. These are examples, not company-approved schedules.</p>
+          <div className="mb-4 flex flex-wrap gap-2">
+            {shiftTemplates.map(t => <button key={t.shift_name} type="button" className={btnSecondaryCls} onClick={() => setForm({...t})}>{t.shift_name} ({t.start_time}–{t.end_time})</button>)}
+          </div>
+        </>}
         <form onSubmit={submit} className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {(schemas[mode] || []).map(([key, label, type = "text", required, options]) =>
             <label key={key} className="text-xs font-semibold text-slate-600">
@@ -201,9 +213,10 @@ export default function Operations({ mode }) {
         <h2 className="mb-4 text-base font-bold text-slate-800">Assign Employee to Shift</h2>
         <form className="flex flex-wrap items-end gap-3" onSubmit={e => {e.preventDefault();act("/api/operations/assignments", { ...assignment, shift_id: Number(assignment.shift_id) });}}>
           <label className="min-w-48 flex-1 text-xs font-semibold text-slate-600">Employee ID<input required className={inputCls+" mt-1"} value={assignment.employee_id} onChange={e => setAssignment(v => ({...v, employee_id: e.target.value}))}/></label>
-          <label className="min-w-48 flex-1 text-xs font-semibold text-slate-600">Shift<select required className={inputCls+" mt-1"} value={assignment.shift_id} onChange={e => setAssignment(v => ({...v, shift_id: e.target.value}))}><option value="">Select shift</option>{shifts.map(s => <option key={s.id} value={s.id}>{s.shift_name}</option>)}</select></label>
-          <button className={btnCls} disabled={busy}>Assign</button>
+          <label className="min-w-48 flex-1 text-xs font-semibold text-slate-600">Shift<select required className={inputCls+" mt-1"} value={assignment.shift_id} onChange={e => setAssignment(v => ({...v, shift_id: e.target.value}))}><option value="">Select shift</option>{shifts.filter(s => s.is_active).map(s => <option key={s.id} value={s.id}>{s.shift_name} ({s.start_time}–{s.end_time})</option>)}</select></label>
+          <button className={btnCls} disabled={busy || !shifts.some(s => s.is_active)}>Assign</button>
         </form>
+        {!shifts.some(s => s.is_active) && <div role="status" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No active shifts exist yet. {role === "admin" ? "Select Add shift, choose a Morning, General or Night template, verify the timings, and save it before assigning employees." : "Ask an administrator to create the required shifts before assigning employees."}</div>}
         {assignments.length > 0 && <p className="mt-3 text-xs text-slate-500">{assignments.length} employee assignments configured</p>}
       </Panel>}
       <Panel className="overflow-x-auto">
