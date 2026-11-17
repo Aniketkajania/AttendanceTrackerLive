@@ -13,60 +13,89 @@ import {
 import { api } from "../api";
 import { Panel, inputCls, btnCls, btnSecondaryCls } from "../ui";
 
-// WebRTC Player Component using MediaMTX WHEP
+// Visible cameras start automatically, with a bounded number of concurrent streams.
+// Each preview has a visible timeout and an independent retry button.
 function WebRTCPlayer({ streamUrl }) {
   const videoRef = useRef(null);
+  const timeoutRef = useRef(null);
+  const [attempt, setAttempt] = useState(0);
+  const [status, setStatus] = useState("connecting");
+  const [message, setMessage] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
     const pc = new RTCPeerConnection();
-    
-    // Tell the browser we only want to receive video
+    const abort = new AbortController();
+    const timeout = window.setTimeout(() => {
+      abort.abort();
+      if (!cancelled) {
+        setStatus("error");
+        setMessage("Camera did not start within 12 seconds. Check camera status or retry.");
+        pc.close();
+      }
+    }, 12000);
+    timeoutRef.current = timeout;
+    setStatus("connecting");
+    setMessage("");
     pc.addTransceiver("video", { direction: "recvonly" });
-
-    // When the stream connects, attach it to the video element
-    pc.ontrack = (event) => {
-      if (videoRef.current) {
-        videoRef.current.srcObject = event.streams[0];
+    pc.ontrack = event => {
+      if (cancelled || !videoRef.current) return;
+      videoRef.current.srcObject = event.streams[0] || new MediaStream([event.track]);
+      videoRef.current.play().catch(() => {});
+    };
+    pc.onconnectionstatechange = () => {
+      if (cancelled) return;
+      if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        window.clearTimeout(timeout);
+        setStatus("error");
+        setMessage("Stream disconnected. Retry to reconnect.");
       }
     };
 
-    // Standard WHEP (WebRTC HTTP Egress Protocol) connection flow
-    pc.createOffer()
-      .then((offer) => pc.setLocalDescription(offer))
-      .then(() => {
-        return fetch(streamUrl, {
+    (async () => {
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const response = await fetch(streamUrl, {
           method: "POST",
           body: pc.localDescription.sdp,
           headers: { "Content-Type": "application/sdp" },
+          signal: abort.signal,
         });
-      })
-      .then((response) => response.text())
-      .then((answer) => {
-        pc.setRemoteDescription(
-          new RTCSessionDescription({ type: "answer", sdp: answer })
-        );
-      })
-      .catch(console.error);
+        if (!response.ok) throw new Error(`Stream request failed (HTTP ${response.status})`);
+        const answer = await response.text();
+        if (cancelled) return;
+        await pc.setRemoteDescription({ type: "answer", sdp: answer });
+      } catch (err) {
+        if (cancelled) return;
+        window.clearTimeout(timeout);
+        setStatus("error");
+        setMessage(err.name === "AbortError" ? "Camera connection timed out." : err.message);
+        pc.close();
+      }
+    })();
 
     return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+      timeoutRef.current = null;
+      abort.abort();
+      if (videoRef.current) videoRef.current.srcObject = null;
       pc.close();
     };
-  }, [streamUrl]);
+  }, [streamUrl, attempt]);
 
-  return (
-    <video
-      ref={videoRef}
-      autoPlay
-      muted
-      playsInline
-      className="max-h-full max-w-full object-contain pointer-events-none will-change-transform"
-      onError={(e) => {
-        e.target.style.display = "none";
-        const fallback = e.target.parentElement.querySelector(".stream-fallback");
-        if (fallback) fallback.style.display = "flex";
-      }}
-    />
-  );
+  return <div className="relative flex h-full w-full items-center justify-center">
+    <video ref={videoRef} autoPlay muted playsInline
+      className="h-full w-full object-contain"
+      onPlaying={() => { window.clearTimeout(timeoutRef.current); setStatus("playing"); setMessage(""); }}
+      onError={() => { setStatus("error"); setMessage("Video playback failed."); }} />
+    {status !== "playing" && <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-slate-950/90 p-4 text-center text-xs text-slate-200">
+      {status === "connecting" ? <><Loader2 size={18} className="animate-spin" /> Connecting preview...</> :
+        <><span>{message || "Preview unavailable"}</span>
+          <button className="rounded-lg bg-blue-600 px-3 py-2 font-bold text-white" onClick={e => { e.stopPropagation(); setAttempt(n => n + 1); }}>Retry stream</button></>}
+    </div>}
+  </div>;
 }
 
 const EMPTY = {
@@ -94,13 +123,21 @@ export default function Cameras() {
   const [saving, setSaving] = useState(false);
   
   // Force HTTP stream reconnects on refresh
-  const [streamKey, setStreamKey] = useState(Date.now());
+  const [streamKey, setStreamKey] = useState(0);
+  // Automatic viewport-aware preview scheduling. With many cameras, only the
+  // first two visible cards receive a live WebRTC session; scrolling switches
+  // streams without any per-camera clicks. Expansion has first priority.
+  const MAX_PREVIEWS = 2;
+  const cardNodes = useRef(new Map());
+  const [visibleCameraIds, setVisibleCameraIds] = useState([]);
+  const visibleIdSet = new Set(visibleCameraIds);
   
   // Track which camera card is popped up in front
   const [expandedId, setExpandedId] = useState(null);
 
+
   const loadData = () => {
-    setStreamKey(Date.now());
+    setStreamKey(n => n + 1);
     api("/api/cameras")
       .then((data) => setCameras(data || []))
       .catch(console.error);
@@ -129,6 +166,54 @@ export default function Cameras() {
     selectedLoc === "All"
       ? cameras
       : cameras.filter((c) => c.location === selectedLoc);
+
+  const visibleCandidateIds = filteredCameras
+    .filter(cam => Boolean(cam.is_active) && visibleIdSet.has(cam.camera_id))
+    .map(cam => cam.camera_id);
+  const activePreviews = expandedId
+    ? [expandedId, ...visibleCandidateIds.filter(id => id !== expandedId)].slice(0, MAX_PREVIEWS)
+    : visibleCandidateIds.slice(0, MAX_PREVIEWS);
+  const activePreviewKey = activePreviews.join("|");
+
+  useEffect(() => {
+    // The intersection observer keeps live streams attached only to on-screen
+    // camera cards, rather than all registered camera feeds.
+    const observer = new IntersectionObserver(entries => {
+      setVisibleCameraIds(previous => {
+        const next = new Set(previous);
+        for (const entry of entries) {
+          const id = entry.target.getAttribute("data-camera-id");
+          if (!id) continue;
+          if (entry.isIntersecting) next.add(id);
+          else next.delete(id);
+        }
+        const nextIds = [...next];
+        return nextIds.length === previous.length &&
+          nextIds.every((id, index) => id === previous[index]) ? previous : nextIds;
+      });
+    }, { root: null, rootMargin: "80px", threshold: 0.05 });
+    for (const node of cardNodes.current.values()) observer.observe(node);
+    return () => observer.disconnect();
+  }, [cameras, selectedLoc]);
+
+  const [health, setHealth] = useState({});
+  useEffect(() => {
+    if (!activePreviews.length) return;
+    let stopped = false;
+    const check = async () => {
+      await Promise.all(activePreviews.map(async id => {
+        try {
+          const metrics = await api(`/api/cameras/${encodeURIComponent(id)}/metrics`);
+          if (!stopped) setHealth(prev => ({ ...prev, [id]: metrics }));
+        } catch { /* preview status still displayed by player */ }
+      }));
+    };
+    check();
+    const poll = window.setInterval(check, 5000);
+    return () => { stopped = true; window.clearInterval(poll); };
+  }, [activePreviewKey]);
+
+
 
   const handleEdit = (e, cam) => {
     e.stopPropagation();
@@ -185,7 +270,7 @@ export default function Cameras() {
             Terminal Camera Wall & Stream Feeds
           </h1>
           <p className="text-[11px] text-slate-500">
-            Click any camera card to expand it in front of the screen
+            Live previews start automatically as cameras enter view. Up to two play at once on this CPU server; click a card to expand.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -234,16 +319,23 @@ export default function Cameras() {
           const isLive = Boolean(cam.is_active);
           const isRTSP = cam.connection_type === "RTSP";
           const isExpanded = expandedId === cam.camera_id;
+          const previewActive = isLive && activePreviews.includes(cam.camera_id);
+          const metrics = health[cam.camera_id];
 
           return (
             <div
               key={cam.camera_id}
+              data-camera-id={cam.camera_id}
+              ref={node => {
+                if (node) cardNodes.current.set(cam.camera_id, node);
+                else cardNodes.current.delete(cam.camera_id);
+              }}
               onClick={() => {
                 if (!isExpanded) setExpandedId(cam.camera_id);
               }}
               className={`group flex flex-col justify-between overflow-hidden rounded-xl border transition-all select-none ${
                 isExpanded
-                  ? "fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[90vw] max-w-2xl max-h-[75vh] shadow-2xl border-slate-700 bg-slate-900"
+                  ? "fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[96vw] max-w-[1600px] max-h-[94vh] shadow-2xl border-slate-700 bg-slate-900"
                   : "relative cursor-pointer border-slate-200 bg-white shadow-2xs hover:border-blue-400 hover:shadow-md"
               }`}
             >
@@ -288,7 +380,7 @@ export default function Cameras() {
                         isLive ? "bg-emerald-500 animate-pulse" : "bg-slate-400"
                       }`}
                     />
-                    {isLive ? (isExpanded ? "EXPANDED" : "ONLINE") : "STANDBY"}
+                    {previewActive ? (isExpanded ? "EXPANDED" : "PREVIEWING") : isLive ? "ENABLED" : "STANDBY"}
                   </span>
 
                   {/* Settings Button */}
@@ -325,15 +417,17 @@ export default function Cameras() {
               {/* Single Shared Video Frame */}
               <div
                 className={`relative w-full bg-slate-950 flex items-center justify-center overflow-hidden [transform:translateZ(0)] ${
-                  isExpanded ? "max-h-[50vh] aspect-video" : "aspect-video"
+                  isExpanded ? "h-[min(82vh,calc(96vw*9/16))] min-h-0" : "aspect-video"
                 }`}
               >
-                {isLive ? (
-                  <WebRTCPlayer 
-                    key={`${cam.camera_id}-${streamKey}`}
-                    streamUrl={`/api/cameras/${cam.camera_id}/whep`} 
-                  />
-                ) : null}
+                {previewActive && <WebRTCPlayer
+                  key={`${cam.camera_id}-${streamKey}`}
+                  streamUrl={`/api/cameras/${encodeURIComponent(cam.camera_id)}/whep`}
+                />}
+                {isLive && !previewActive && <div className="flex flex-col items-center gap-2 text-center text-slate-300">
+                  <Video size={24} />
+                  <span className="text-xs">{visibleIdSet.has(cam.camera_id) ? "Preview queued — limited to two active streams" : "Preview starts automatically when visible"}</span>
+                </div>}
 
                 {/* Standby / Offline Fallback */}
                 <div
@@ -343,18 +437,9 @@ export default function Cameras() {
                 >
                   <Video size={isExpanded ? 32 : 22} className="text-slate-600" />
                   <span className="text-[10px] font-mono tracking-tight text-slate-400">
-                    {isLive ? "Connecting stream..." : "Camera Deactivated"}
+                    {isLive ? "Preview paused" : "Camera Deactivated"}
                   </span>
                 </div>
-
-                {/* Hover prompt */}
-                {!isExpanded && (
-                  <div className="absolute inset-0 bg-slate-900/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
-                    <span className="inline-flex items-center gap-1.5 bg-blue-600 text-white text-[11px] font-semibold px-2.5 py-1 rounded-md shadow">
-                      <Maximize2 size={12} /> Click to expand
-                    </span>
-                  </div>
-                )}
 
                 {/* Overlay Tag */}
                 <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/80 via-black/30 to-transparent px-2.5 py-1 text-[9px] font-mono text-white pointer-events-none">
@@ -362,8 +447,8 @@ export default function Cameras() {
                     {isRTSP ? `rtsp://${cam.ip_address}:${cam.port}` : "USB Webcam (Local)"}
                   </span>
                   <span className="flex items-center gap-1 text-emerald-400 font-semibold">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    LIVE FEED
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                    {previewActive ? (metrics?.connected ? "CAMERA CONNECTED" : "CONNECTING / OFFLINE") : "AUTO PREVIEW"}
                   </span>
                 </div>
               </div>
@@ -380,7 +465,7 @@ export default function Cameras() {
                   {isRTSP ? cam.rtsp_path : `Device Index: ${cam.webcam_index}`}
                 </span>
                 <span className="flex items-center gap-1 font-semibold text-emerald-500">
-                  <CheckCircle2 size={11} /> 512-D Vision
+                  {previewActive && metrics ? `${metrics.frame_age_ms ?? "—"}ms age · ${metrics.reconnects ?? 0} reconnects` : "Preview on demand"}
                 </span>
               </div>
             </div>

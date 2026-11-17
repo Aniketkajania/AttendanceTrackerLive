@@ -36,9 +36,10 @@ def check(u: UserIn, creating: bool):
 def list_users(request: Request):
     admin_only(request)
     conn = db()
-    rows = [dict(r) for r in conn.execute("SELECT username, full_name, role FROM admin_users ORDER BY role, username")]
-    conn.close()
-    return rows
+    try:
+        return conn.execute("SELECT username, full_name, role FROM admin_users ORDER BY role, username").fetchall()
+    finally:
+        conn.close()
 
 @router.post("")
 def create_user(u: UserIn, request: Request):
@@ -49,11 +50,14 @@ def create_user(u: UserIn, request: Request):
     check(u, creating=True)
     conn = db()
     try:
+        if conn.execute("SELECT TOP 1 1 AS present FROM admin_users WHERE username=?", (uname,)).fetchone():
+            raise HTTPException(409, f"Username '{uname}' already exists")
         conn.execute("INSERT INTO admin_users (username, password_hash, full_name, role) VALUES (?,?,?,?)",
                      (uname, hash_pw(u.password), u.full_name.strip(), u.role))
         conn.commit()
-    except IntegrityError:
-        raise HTTPException(409, f"Username '{uname}' already exists")
+    except IntegrityError as exc:
+        conn.rollback()
+        raise HTTPException(409, f"Username '{uname}' already exists") from exc
     finally:
         conn.close()
     return {"ok": True}

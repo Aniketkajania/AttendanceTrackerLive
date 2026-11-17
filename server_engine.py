@@ -62,6 +62,7 @@ from config import (
 )
 from db import connect
 from email_notifier import send_attendance_email_async
+from diagnostic_logging import setup_engine_logging, diag
 import face_pipeline as fp
 from face_pipeline import (
     FaceFinder, FaceTracker, enhance_for_detection,
@@ -69,8 +70,8 @@ from face_pipeline import (
 )
 
 # Tracks survive a missed detection a little longer, because we now process ~8 frames/s, not 30.
-fp.TRACK_TTL = 0.5
-fp.TRACK_TTL_CONFIRMED = 0.5
+fp.TRACK_TTL = float(os.getenv("UNCONFIRMED_TRACK_TTL", "2.0"))
+fp.TRACK_TTL_CONFIRMED = float(os.getenv("CONFIRMED_TRACK_TTL", "2.5"))
 
 
 # =====================================================================
@@ -82,13 +83,13 @@ DETECTOR_PACK = os.getenv("DETECTOR_PACK", "buffalo_s")                         
 # ---- stream decoding ----
 STREAM_BACKEND = os.getenv("STREAM_BACKEND", "auto").strip().lower()     # auto | ffmpeg | opencv
 DECODE_FPS = float(os.getenv("DECODE_FPS", "8"))                         # frames/s handed to the engine
-STREAM_MAX_WIDTH = int(os.getenv("STREAM_MAX_WIDTH", "1920"))            # larger frames are downscaled by ffmpeg
+STREAM_MAX_WIDTH = int(os.getenv("STREAM_MAX_WIDTH", "1280"))            # larger frames are downscaled by ffmpeg
 FFMPEG_HWACCEL = os.getenv("FFMPEG_HWACCEL", "").strip()                 # "", auto, cuda, d3d11va, qsv
 STALL_SEC = 8.0                                                          # no frames for this long -> restart ffmpeg
 RECONNECT_DELAY = 3.0
 
 # ---- idle gating ----
-MOTION_GATE = os.getenv("MOTION_GATE", "1").strip() == "1"
+MOTION_GATE = os.getenv("MOTION_GATE", "0").strip() == "1"
 MOTION_SIZE = (320, 180)        # frame is shrunk to this for the motion check
 MOTION_PIX_DELTA = 18           # grey-level change that counts as "moved"
 MOTION_MIN_PIXELS = 30          # changed pixels (of 57,600) needed to wake the detector
@@ -98,17 +99,20 @@ BUSY_SEC = 1.5                  # keep scanning every frame this long after a fa
 # ---- engine ----
 USE_INTEL_GPU = False
 DET_SIZE = (640, 640)           # only used for model.prepare(); real detection sizes live in face_pipeline.py
-INFER_EVERY = 0.12              # min seconds between passes per camera
+INFER_EVERY = float(os.getenv("INFER_EVERY", "0.08"))
 OVERLAY_TTL = 2.5
 PREVIEW_MAX_WIDTH = 1280
 SHOW_PREVIEW = _SHOW_PREVIEW
 REVERIFY = 2.0                  # confirmed tracks are re-checked this often (seconds)
 STATS_EVERY = 30                # seconds between [STATS] lines
+MAX_FRAME_AGE = float(os.getenv("MAX_FRAME_AGE", "1.25"))
+NEAR_RECOVERY_LIMIT = int(os.getenv("NEAR_RECOVERY_LIMIT", "1"))
+ENABLE_ENHANCEMENT = os.getenv("ENABLE_ENHANCEMENT", "0").strip() == "1"
+QUALITY_SCAN_INTERVAL = max(0.0, float(os.getenv("QUALITY_SCAN_INTERVAL", "0")))
+# Optional higher-resolution scan every N seconds per camera; 0 disables it.
 ORT_THREADS = int(os.getenv("ORT_THREADS", str(max(2, (os.cpu_count() or 4) // 2))))
 
-CAMERA_ROIS: dict = {
-    # "HO_IN": [(0.15, 0.05, 0.55, 0.85)]
-}
+CAMERA_ROIS: dict = {}
 TILE_GRID = None                # e.g. (3, 2)
 
 
@@ -458,7 +462,7 @@ def save_gate_snapshot(frame, bbox, employee_id: str, location: str, tag: str) -
     return filepath
 
 
-def process_strict_in_out_event(user: dict, cam_config: dict, confidence: float, frame, bbox):
+def process_strict_in_out_event(user: dict, cam_config: dict, confidence: float, frame, bbox, event_epoch=None):
     """
     Processes a verified face against strict camera_role ('IN' or 'OUT'):
     - Triggers email on FIRST CHECK-IN of the day.
@@ -473,208 +477,223 @@ def process_strict_in_out_event(user: dict, cam_config: dict, confidence: float,
     cam_loc = cam_config["location"]
     cam_role = cam_config["camera_role"]  # Strictly 'IN' or 'OUT'
 
-    now_dt = datetime.now()
+    # Preserve the time the person was recognized even when the SQL writer
+    # is delayed by a busy database or other queued attendance events.
+    now_dt = datetime.fromtimestamp(event_epoch) if event_epoch is not None else datetime.now()
     work_date_str = now_dt.strftime("%Y-%m-%d")
     now_ts_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT * FROM daily_attendance
-        WHERE employee_id = ? AND work_date = ?
-    """, (emp_id, work_date_str))
-    summary = cursor.fetchone()
-
-    email_payload = None
-    snapshot_path = None
-
-    # ==========================================================
-    # CASE 1: NO RECORD TODAY YET
-    # ==========================================================
-    if not summary:
-        if cam_role == "IN":
-            snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "FIRST_IN")
-            visited_str = cam_loc
-
-            cursor.execute("""
-                INSERT INTO daily_attendance (
-                    employee_id, person_name, base_location, work_date,
-                    first_check_in, first_check_in_camera, first_check_in_location, first_check_in_image,
-                    current_status, current_location, visited_locations,
-                    last_event_time, total_checks, out_of_office_hours, total_working_hours
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'IN', ?, ?, ?, 1, 0.0, 0.0)
-            """, (emp_id, name, base_loc, work_date_str, now_ts_str, cam_id, cam_loc, snapshot_path,
-                  cam_loc, visited_str, now_ts_str))
-
-            print(f"\n[FIRST CHECK-IN] {name} ({emp_id}) at {cam_loc} ({cam_id}) | {now_ts_str}")
-
-            email_payload = {
-                "email": email,
-                "person_name": name,
-                "employee_id": emp_id,
-                "event_title": "FIRST CHECK-IN",
-                "event_type": "IN",
-                "event_time": now_ts_str,
-                "camera_id": cam_id,
-                "camera_location": cam_loc,
-                "first_check_in": now_ts_str,
-                "first_check_in_location": cam_loc,
-                "last_check_out": None,
-                "visited_locations": visited_str,
-                "total_checks": 1,
-                "out_of_office_hours": 0.0,
-                "total_working_hours": 0.0,
-                "snapshot_path": snapshot_path
-            }
+    try:
+        cursor = conn.cursor()
+    
+        cursor.execute("""
+            SELECT * FROM daily_attendance
+            WHERE employee_id = ? AND work_date = ?
+        """, (emp_id, work_date_str))
+        summary = cursor.fetchone()
+    
+        email_payload = None
+        snapshot_path = None
+    
+        # ==========================================================
+        # CASE 1: NO RECORD TODAY YET
+        # ==========================================================
+        if not summary:
+            if cam_role == "IN":
+                snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "FIRST_IN")
+                visited_str = cam_loc
+    
+                cursor.execute("""
+                    INSERT INTO daily_attendance (
+                        employee_id, person_name, base_location, work_date,
+                        first_check_in, first_check_in_camera, first_check_in_location, first_check_in_image,
+                        current_status, current_location, visited_locations,
+                        last_event_time, total_checks, out_of_office_hours, total_working_hours
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'IN', ?, ?, ?, 1, 0.0, 0.0)
+                """, (emp_id, name, base_loc, work_date_str, now_ts_str, cam_id, cam_loc, snapshot_path,
+                      cam_loc, visited_str, now_ts_str))
+    
+                print(f"\n[FIRST CHECK-IN] {name} ({emp_id}) at {cam_loc} ({cam_id}) | {now_ts_str}")
+    
+                email_payload = {
+                    "email": email,
+                    "person_name": name,
+                    "employee_id": emp_id,
+                    "event_title": "FIRST CHECK-IN",
+                    "event_type": "IN",
+                    "event_time": now_ts_str,
+                    "camera_id": cam_id,
+                    "camera_location": cam_loc,
+                    "first_check_in": now_ts_str,
+                    "first_check_in_location": cam_loc,
+                    "last_check_out": None,
+                    "visited_locations": visited_str,
+                    "total_checks": 1,
+                    "out_of_office_hours": 0.0,
+                    "total_working_hours": 0.0,
+                    "snapshot_path": snapshot_path
+                }
+            else:
+                # Employee walked past OUT camera without checking IN first today
+                snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "UNMATCHED_OUT")
+                visited_str = cam_loc
+                cursor.execute("""
+                    INSERT INTO daily_attendance (
+                        employee_id, person_name, base_location, work_date,
+                        last_check_out, last_check_out_camera, last_check_out_location, last_check_out_image,
+                        current_status, current_location, visited_locations,
+                        last_event_time, total_checks, out_of_office_hours, total_working_hours
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OUT', ?, ?, ?, 1, 0.0, 0.0)
+                """, (emp_id, name, base_loc, work_date_str, now_ts_str, cam_id, cam_loc, snapshot_path,
+                      cam_loc, visited_str, now_ts_str))
+    
+                print(f"\n[CHECK-OUT (NO PRIOR IN)] {name} ({emp_id}) at {cam_loc} ({cam_id}) | {now_ts_str}")
+    
+                email_payload = {
+                    "email": email,
+                    "person_name": name,
+                    "employee_id": emp_id,
+                    "event_title": "CHECK-OUT",
+                    "event_type": "OUT",
+                    "event_time": now_ts_str,
+                    "camera_id": cam_id,
+                    "camera_location": cam_loc,
+                    "first_check_in": "Not Recorded",
+                    "first_check_in_location": "-",
+                    "last_check_out": f"{now_ts_str} ({cam_loc})",
+                    "visited_locations": visited_str,
+                    "total_checks": 1,
+                    "out_of_office_hours": 0.0,
+                    "total_working_hours": 0.0,
+                    "snapshot_path": snapshot_path
+                }
+    
+        # ==========================================================
+        # CASE 2: RECORD ALREADY EXISTS FOR TODAY
+        # ==========================================================
         else:
-            # Employee walked past OUT camera without checking IN first today
-            snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "UNMATCHED_OUT")
-            visited_str = cam_loc
-            cursor.execute("""
-                INSERT INTO daily_attendance (
-                    employee_id, person_name, base_location, work_date,
-                    last_check_out, last_check_out_camera, last_check_out_location, last_check_out_image,
-                    current_status, current_location, visited_locations,
-                    last_event_time, total_checks, out_of_office_hours, total_working_hours
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OUT', ?, ?, ?, 1, 0.0, 0.0)
-            """, (emp_id, name, base_loc, work_date_str, now_ts_str, cam_id, cam_loc, snapshot_path,
-                  cam_loc, visited_str, now_ts_str))
+            prev_status = summary["current_status"]
+            last_time_dt = datetime.strptime(summary["last_event_time"], "%Y-%m-%d %H:%M:%S")
+            delta_hours = max(0.0, (now_dt - last_time_dt).total_seconds() / 3600.0)
+    
+            total_checks = summary["total_checks"] + 1
+            work_hrs = float(summary["total_working_hours"])
+            ooo_hrs = float(summary["out_of_office_hours"])
+    
+            # Update visited_locations breadcrumb if roaming to a new site
+            visited_list = [loc.strip() for loc in (summary["visited_locations"] or "").split("->") if loc.strip()]
+            if not visited_list or visited_list[-1] != cam_loc:
+                visited_list.append(cam_loc)
+            visited_str = " -> ".join(visited_list)
+    
+            if cam_role == "OUT":
+                # ----------------------------------------------------
+                # CHECK-OUT CAMERA TRIGGERED
+                # ----------------------------------------------------
+                snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "LAST_OUT")
+    
+                if prev_status == "IN":
+                    work_hrs = round(work_hrs + delta_hours, 4)
+    
+                cursor.execute("""
+                    UPDATE daily_attendance SET
+                        last_check_out = ?,
+                        last_check_out_camera = ?,
+                        last_check_out_location = ?,
+                        last_check_out_image = ?,
+                        current_status = 'OUT',
+                        current_location = ?,
+                        visited_locations = ?,
+                        last_event_time = ?,
+                        total_checks = ?,
+                        total_working_hours = ?
+                    WHERE employee_id = ? AND work_date = ?
+                """, (now_ts_str, cam_id, cam_loc, snapshot_path, cam_loc, visited_str,
+                      now_ts_str, total_checks, work_hrs, emp_id, work_date_str))
+    
+                print(f"\n[CHECK-OUT] {name} ({emp_id}) exited at {cam_loc} ({cam_id}) | Total Work: {work_hrs:.2f} hrs")
+    
+                # ALWAYS trigger email on every OUT event
+                email_payload = {
+                    "email": email,
+                    "person_name": name,
+                    "employee_id": emp_id,
+                    "event_title": "CHECK-OUT",
+                    "event_type": "OUT",
+                    "event_time": now_ts_str,
+                    "camera_id": cam_id,
+                    "camera_location": cam_loc,
+                    "first_check_in": summary["first_check_in"] or "Not Recorded",
+                    "first_check_in_location": summary["first_check_in_location"] or "-",
+                    "last_check_out": f"{now_ts_str} ({cam_loc})",
+                    "visited_locations": visited_str,
+                    "total_checks": total_checks,
+                    "out_of_office_hours": ooo_hrs,
+                    "total_working_hours": work_hrs,
+                    "snapshot_path": snapshot_path
+                }
+    
+            elif cam_role == "IN":
+                # ----------------------------------------------------
+                # CHECK-IN CAMERA TRIGGERED (RE-ENTRY OR TERMINAL VISIT)
+                # ----------------------------------------------------
+                snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "RE_IN")
+    
+                if prev_status == "OUT":
+                    ooo_hrs = round(ooo_hrs + delta_hours, 4)
+    
+                # Backfill first_check_in only if their very first punch today was an unmatched OUT
+                first_in = summary["first_check_in"] or now_ts_str
+                first_in_cam = summary["first_check_in_camera"] or cam_id
+                first_in_loc = summary["first_check_in_location"] or cam_loc
+                first_in_img = summary["first_check_in_image"] or snapshot_path
+    
+                cursor.execute("""
+                    UPDATE daily_attendance SET
+                        first_check_in = ?,
+                        first_check_in_camera = ?,
+                        first_check_in_location = ?,
+                        first_check_in_image = ?,
+                        current_status = 'IN',
+                        current_location = ?,
+                        visited_locations = ?,
+                        last_event_time = ?,
+                        total_checks = ?,
+                        out_of_office_hours = ?
+                    WHERE employee_id = ? AND work_date = ?
+                """, (first_in, first_in_cam, first_in_loc, first_in_img, cam_loc, visited_str,
+                      now_ts_str, total_checks, ooo_hrs, emp_id, work_date_str))
+    
+                print(f"\n[RE-ENTRY IN] {name} ({emp_id}) entered {cam_loc} ({cam_id}) | Out-of-Office: {ooo_hrs:.2f} hrs")
+                # Note: No email on intermediate re-entries; only on First IN and Every OUT.
+    
+        # Always append to immutable attendance_logs table
+        cursor.execute("""
+            INSERT INTO attendance_logs (
+                employee_id, person_name, camera_id, camera_location,
+                work_date, event_type, event_timestamp, confidence_score, snapshot_image
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (emp_id, name, cam_id, cam_loc, work_date_str, cam_role, now_ts_str, round(confidence, 4), snapshot_path))
+    
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
-            print(f"\n[CHECK-OUT (NO PRIOR IN)] {name} ({emp_id}) at {cam_loc} ({cam_id}) | {now_ts_str}")
-
-            email_payload = {
-                "email": email,
-                "person_name": name,
-                "employee_id": emp_id,
-                "event_title": "CHECK-OUT",
-                "event_type": "OUT",
-                "event_time": now_ts_str,
-                "camera_id": cam_id,
-                "camera_location": cam_loc,
-                "first_check_in": "Not Recorded",
-                "first_check_in_location": "-",
-                "last_check_out": f"{now_ts_str} ({cam_loc})",
-                "visited_locations": visited_str,
-                "total_checks": 1,
-                "out_of_office_hours": 0.0,
-                "total_working_hours": 0.0,
-                "snapshot_path": snapshot_path
-            }
-
-    # ==========================================================
-    # CASE 2: RECORD ALREADY EXISTS FOR TODAY
-    # ==========================================================
-    else:
-        prev_status = summary["current_status"]
-        last_time_dt = datetime.strptime(summary["last_event_time"], "%Y-%m-%d %H:%M:%S")
-        delta_hours = max(0.0, (now_dt - last_time_dt).total_seconds() / 3600.0)
-
-        total_checks = summary["total_checks"] + 1
-        work_hrs = float(summary["total_working_hours"])
-        ooo_hrs = float(summary["out_of_office_hours"])
-
-        # Update visited_locations breadcrumb if roaming to a new site
-        visited_list = [loc.strip() for loc in (summary["visited_locations"] or "").split("->") if loc.strip()]
-        if not visited_list or visited_list[-1] != cam_loc:
-            visited_list.append(cam_loc)
-        visited_str = " -> ".join(visited_list)
-
-        if cam_role == "OUT":
-            # ----------------------------------------------------
-            # CHECK-OUT CAMERA TRIGGERED
-            # ----------------------------------------------------
-            snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "LAST_OUT")
-
-            if prev_status == "IN":
-                work_hrs = round(work_hrs + delta_hours, 4)
-
-            cursor.execute("""
-                UPDATE daily_attendance SET
-                    last_check_out = ?,
-                    last_check_out_camera = ?,
-                    last_check_out_location = ?,
-                    last_check_out_image = ?,
-                    current_status = 'OUT',
-                    current_location = ?,
-                    visited_locations = ?,
-                    last_event_time = ?,
-                    total_checks = ?,
-                    total_working_hours = ?
-                WHERE employee_id = ? AND work_date = ?
-            """, (now_ts_str, cam_id, cam_loc, snapshot_path, cam_loc, visited_str,
-                  now_ts_str, total_checks, work_hrs, emp_id, work_date_str))
-
-            print(f"\n[CHECK-OUT] {name} ({emp_id}) exited at {cam_loc} ({cam_id}) | Total Work: {work_hrs:.2f} hrs")
-
-            # ALWAYS trigger email on every OUT event
-            email_payload = {
-                "email": email,
-                "person_name": name,
-                "employee_id": emp_id,
-                "event_title": "CHECK-OUT",
-                "event_type": "OUT",
-                "event_time": now_ts_str,
-                "camera_id": cam_id,
-                "camera_location": cam_loc,
-                "first_check_in": summary["first_check_in"] or "Not Recorded",
-                "first_check_in_location": summary["first_check_in_location"] or "-",
-                "last_check_out": f"{now_ts_str} ({cam_loc})",
-                "visited_locations": visited_str,
-                "total_checks": total_checks,
-                "out_of_office_hours": ooo_hrs,
-                "total_working_hours": work_hrs,
-                "snapshot_path": snapshot_path
-            }
-
-        elif cam_role == "IN":
-            # ----------------------------------------------------
-            # CHECK-IN CAMERA TRIGGERED (RE-ENTRY OR TERMINAL VISIT)
-            # ----------------------------------------------------
-            snapshot_path = save_gate_snapshot(frame, bbox, emp_id, cam_loc, "RE_IN")
-
-            if prev_status == "OUT":
-                ooo_hrs = round(ooo_hrs + delta_hours, 4)
-
-            # Backfill first_check_in only if their very first punch today was an unmatched OUT
-            first_in = summary["first_check_in"] or now_ts_str
-            first_in_cam = summary["first_check_in_camera"] or cam_id
-            first_in_loc = summary["first_check_in_location"] or cam_loc
-            first_in_img = summary["first_check_in_image"] or snapshot_path
-
-            cursor.execute("""
-                UPDATE daily_attendance SET
-                    first_check_in = ?,
-                    first_check_in_camera = ?,
-                    first_check_in_location = ?,
-                    first_check_in_image = ?,
-                    current_status = 'IN',
-                    current_location = ?,
-                    visited_locations = ?,
-                    last_event_time = ?,
-                    total_checks = ?,
-                    out_of_office_hours = ?
-                WHERE employee_id = ? AND work_date = ?
-            """, (first_in, first_in_cam, first_in_loc, first_in_img, cam_loc, visited_str,
-                  now_ts_str, total_checks, ooo_hrs, emp_id, work_date_str))
-
-            print(f"\n[RE-ENTRY IN] {name} ({emp_id}) entered {cam_loc} ({cam_id}) | Out-of-Office: {ooo_hrs:.2f} hrs")
-            # Note: No email on intermediate re-entries; only on First IN and Every OUT.
-
-    # Always append to immutable attendance_logs table
-    cursor.execute("""
-        INSERT INTO attendance_logs (
-            employee_id, person_name, camera_id, camera_location,
-            work_date, event_type, event_timestamp, confidence_score, snapshot_image
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (emp_id, name, cam_id, cam_loc, work_date_str, cam_role, now_ts_str, round(confidence, 4), snapshot_path))
-
-    conn.commit()
-    conn.close()
-
+    diag(f"[EVENTS] committed employee={emp_id} camera={cam_id} role={cam_role} at={now_ts_str}")
     if email_payload:
-        send_attendance_email_async(email_payload)
-
+        try:
+            send_attendance_email_async(email_payload)
+        except Exception as exc:
+            # A notification failure must never make a successfully committed
+            # punch look like a database failure or trigger a duplicate write.
+            print(f"[EMAIL] scheduling failed after committed punch: {type(exc).__name__}: {exc}", flush=True)
 
 class EventWriter(threading.Thread):
     """Records punches (SQL + snapshot + email) off the inference thread, so recognition never waits on the DB."""
@@ -693,7 +712,7 @@ class EventWriter(threading.Thread):
             try:
                 process_strict_in_out_event(*item)
             except Exception as e:
-                print(f"[EVENTS] failed to record a punch: {type(e).__name__}: {e}")
+                diag(f"[EVENTS] failed to record a punch: {type(e).__name__}: {e}")
                 conn = getattr(_tls, "conn", None)      # do not leak the half-used connection
                 if conn is not None:
                     try:
@@ -854,7 +873,12 @@ class InferenceWorker(threading.Thread):
         self.last_infer = {}
         self.prev_small = {}              # camera_id -> previous small grey frame (motion gate)
         self.last_full = {}               # camera_id -> time of the last full scan
+        self.last_quality = {}            # last expensive quality scan per camera
         self.stats = {}                   # camera_id -> {"seen", "scanned", "ms"}
+        self.timing = {}
+        self.recognition_stats = {}
+        self.rejection_stats = {}
+        self.rejection_log_at = {}
         self.running = True
 
     # ---------- preview side ----------
@@ -881,12 +905,13 @@ class InferenceWorker(threading.Thread):
     def run(self):
         while self.running:
             did_work = False
-            for cid, stream in list(self.streams.items()):
+            streams = sorted(list(self.streams.items()), key=lambda item: self.last_infer.get(item[0], 0.0))
+            for cid, stream in streams:
                 now = time.time()
                 if now - self.last_infer.get(cid, 0.0) < INFER_EVERY:
                     continue
                 frame, fts = stream.get_latest_frame()
-                if frame is None or fts == self.last_frame_ts.get(cid):
+                if frame is None or fts == self.last_frame_ts.get(cid) or now - fts > MAX_FRAME_AGE:
                     continue
                 self.last_frame_ts[cid] = fts
                 self.last_infer[cid] = now
@@ -899,16 +924,17 @@ class InferenceWorker(threading.Thread):
                     print(f"[INFER] {cid} error: {type(e).__name__}: {e}")
                 dt = time.time() - t0
 
-                st = self.stats.setdefault(cid, {"seen": 0, "scanned": 0, "ms": 0.0})
+                st = self.stats.setdefault(cid, {"seen": 0, "scanned": 0, "ms": 0.0, "frame_age_ms": 0.0})
                 st["seen"] += 1
+                st["frame_age_ms"] += max(0.0, now - fts) * 1000.0
                 if ran:
                     st["scanned"] += 1
                     st["ms"] += dt * 1000.0
                     if dt > 0.6:
-                        print(f"[SLOW] {cid}: one scan took {dt:.2f}s")
+                        diag(f"[SLOW] {cid}: one scan took {dt:.2f}s")
                 did_work = True
             if not did_work:
-                time.sleep(0.01)
+                time.sleep(0.005)
 
     # ---------- motion gate ----------
     def _motion(self, cid, gray):
@@ -940,17 +966,29 @@ class InferenceWorker(threading.Thread):
         self.last_full[cid] = now
 
         # enhancement (LAB conversion) only when the scene really is dark / blown out / flat
-        mean, std = float(gray.mean()), float(gray.std())
-        det_frame = frame if (95 <= mean <= 165 and std >= 40) else enhance_for_detection(frame)
-        dets = self.finder.detect(det_frame, rois=CAMERA_ROIS.get(cid), tile_grid=TILE_GRID)
+        if ENABLE_ENHANCEMENT:
+            mean, std = float(gray.mean()), float(gray.std())
+            det_frame = frame if (95 <= mean <= 165 and std >= 40) else enhance_for_detection(frame)
+        else:
+            det_frame = frame
+        detect_start = time.perf_counter()
+        high_accuracy = QUALITY_SCAN_INTERVAL > 0 and now - self.last_quality.get(cid, 0) >= QUALITY_SCAN_INTERVAL
+        if high_accuracy:
+            self.last_quality[cid] = now
+        dets = self.finder.detect(det_frame, rois=None, tile_grid=TILE_GRID, high_accuracy=high_accuracy)
+        tm = self.timing.setdefault(cid, {"detect_ms": 0.0, "embed_ms": 0.0, "embeds": 0, "detects": 0})
+        tm["detect_ms"] += (time.perf_counter() - detect_start) * 1000
+        tm["detects"] += 1
 
         for track, det in tracker.update(dets, now):
             self._process(track, det, frame, cam_cfg, users, matrix, now)
 
         # faces we were following but the full pass missed: look right where they were
+        recovery_attempts = 0
         for t in tracker.tracks:
-            if t.matched_now:
+            if t.matched_now or recovery_attempts >= NEAR_RECOVERY_LIMIT:
                 continue
+            recovery_attempts += 1
             d = self.finder.detect_near(det_frame, t.display_box(now))
             if d is not None:
                 t.update(d["bbox"], now)
@@ -964,10 +1002,26 @@ class InferenceWorker(threading.Thread):
             return
         snapshot = []
         for t in tracker.tracks:
+            if now - t.last_seen > 0.6:
+                continue
             self._refresh_label(t, cam_role, now)
-            snapshot.append((t.bbox.copy(), t.vel.copy(), t.last_seen, t.color, t.label))
+            # Use the last measured bbox; predicted velocity can create
+            # floating rectangles when detections are small or intermittent.
+            snapshot.append((t.bbox.copy(), np.zeros(4, np.float32), t.last_seen, t.color, t.label))
         with self.overlay_lock:
             self.overlays[cid] = (time.time(), snapshot)
+
+    def _reject(self, cid, reason, track, now, detail=""):
+        """Report why a visible face was not confirmed, without storing images."""
+        counts = self.rejection_stats.setdefault(cid, {})
+        counts[reason] = counts.get(reason, 0) + 1
+        key = (cid, track.id, reason)
+        if now - self.rejection_log_at.get(key, 0) >= 10:
+            self.rejection_log_at[key] = now
+            diag(f"[MATCH_REJECT] camera={cid} track={track.id} reason={reason} {detail}")
+        if len(self.rejection_log_at) > 2000:
+            cutoff = now - 30
+            self.rejection_log_at = {k: t for k, t in self.rejection_log_at.items() if t >= cutoff}
 
     # ---------- identity for one tracked face ----------
     def _process(self, track, det, frame, cam_cfg, users, matrix, now):
@@ -977,15 +1031,25 @@ class InferenceWorker(threading.Thread):
 
         ok, reason, m, q = self.finder.assess(frame, det["bbox"], det["kps"], det["score"])
         if not ok:
+            self._reject(cam_cfg["camera_id"], "quality_" + reason.lower().replace(" ", "_"), track, now,
+                         f"face_px={m.get('px')} sharp={m.get('sharp', 0):.1f} "
+                         f"yaw={m.get('yaw', 0):.2f} detector_score={m.get('score', 0):.3f}")
             if track.confirmed_id is None:
-                track.label, track.color = "Unknown", (0, 0, 255)
+                track.label, track.color = reason, (0, 165, 255)
             return
 
         if not len(users):
-            track.label, track.color = "Unknown", (0, 0, 255)
+            self._reject(cam_cfg["camera_id"], "no_active_enrollments", track, now)
+            track.label, track.color = "No Enrollments", (0, 165, 255)
             return
 
+        embed_start = time.perf_counter()
         emb = self.finder.embed(frame, det["kps"], det["bbox"], det["score"])
+        tm = self.timing.setdefault(cam_cfg["camera_id"], {"detect_ms": 0.0, "embed_ms": 0.0, "embeds": 0, "detects": 0})
+        tm["embed_ms"] += (time.perf_counter() - embed_start) * 1000
+        tm["embeds"] += 1
+        if track.good_samples == 0:
+            track.first_embedding_at = time.time()
         track.embs.append((emb, q))
         track.good_samples += 1
         track.last_verify = now
@@ -1001,6 +1065,11 @@ class InferenceWorker(threading.Thread):
         best = users[int(order[0])]
         margin_ok = (len(order) < 2) or ((s1 - s2) >= MATCH_MARGIN)
         matched = (s1 >= SIMILARITY_THRESHOLD) and margin_ok
+        if not matched:
+            why = "low_similarity" if s1 < SIMILARITY_THRESHOLD else "ambiguous_identity"
+            self._reject(cam_cfg["camera_id"], why, track, now,
+                         f"best_score={s1:.3f} second_score={s2:.3f} "
+                         f"threshold={SIMILARITY_THRESHOLD:.3f} margin={s1 - s2:.3f}")
 
         # ---- already confirmed: re-verification ----
         if track.confirmed_id is not None:
@@ -1025,10 +1094,26 @@ class InferenceWorker(threading.Thread):
             track.confirmed_name = best["person_name"]
             track.confirmed_score = s1
             track.disagree = 0
-            self._record(track, best, cam_cfg, s1, track.best_frame, track.best_bbox, now)
+            confirmed_at = time.time()
+            detected_to_confirm_ms = max(0.0, (confirmed_at - track.created) * 1000.0)
+            first_embed_to_confirm_ms = max(0.0, (confirmed_at - getattr(track, "first_embedding_at", confirmed_at)) * 1000.0)
+            queued = self._record(track, best, cam_cfg, s1, track.best_frame, track.best_bbox, now)
+            print(
+                f"[RECOGNITION] camera={cam_cfg['camera_id']} track={track.id} "
+                f"detected_to_confirm={detected_to_confirm_ms:.0f}ms "
+                f"first_embedding_to_confirm={first_embed_to_confirm_ms:.0f}ms "
+                f"samples={track.good_samples} confidence={s1:.3f} "
+                f"attendance={'queued' if queued else 'not_queued_or_cooldown'}",
+                flush=True,
+            )
+            rec = self.recognition_stats.setdefault(cam_cfg["camera_id"], {"count": 0, "total_ms": 0.0})
+            rec["count"] += 1
+            rec["total_ms"] += detected_to_confirm_ms
             track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
         elif matched:
-            track.label, track.color = f"{best['person_name']} ({s1:.2f})", (0, 255, 0)
+            self._reject(cam_cfg["camera_id"], "waiting_for_confirmation", track, now,
+                         f"votes={cnt}/{CONFIRM_VOTES} score={s1:.3f}")
+            track.label, track.color = f"Checking ({cnt}/{CONFIRM_VOTES})", (0, 220, 255)
         else:
             track.label, track.color = f"Unknown ({s1:.2f})", (0, 0, 255)
 
@@ -1038,10 +1123,12 @@ class InferenceWorker(threading.Thread):
             self.cooldown_tracker[key] = now
             track.recorded_at = now
             try:
-                self.events.put_nowait((user, dict(cam_cfg), score, frame, np.array(bbox, copy=True)))
+                self.events.put_nowait((user, dict(cam_cfg), score, frame, np.array(bbox, copy=True), now))
+                return True
             except queue.Full:
                 self.cooldown_tracker.pop(key, None)    # allow a retry on the next sighting
-                print("[EVENTS] queue full, punch not recorded (will retry on next sighting)")
+                diag("[EVENTS] queue full, punch not recorded (will retry on next sighting)")
+        return False
 
     def _refresh_label(self, track, cam_role, now):
         """Overrides any cooldown or system text to strictly show Name (Score)."""
@@ -1079,6 +1166,7 @@ def render_preview(frame, boxes, cid, cam_cfg):
 def main():
     import signal
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    setup_engine_logging(os.path.dirname(os.path.abspath(__file__)))
     cv2.setNumThreads(2)            # OpenCV's own thread pool must not fight the models for cores
 
     print(f"[ENGINE] recognizer={FACE_MODEL}  detector={DETECTOR_PACK}  motion gate={'on' if MOTION_GATE else 'off'}")
@@ -1150,6 +1238,12 @@ def main():
                 dt = now_epoch - last_stats
                 last_stats = now_epoch
                 st = worker.pop_stats()
+                rejected = worker.rejection_stats
+                worker.rejection_stats = {}
+                timing = worker.timing
+                worker.timing = {}
+                recognition_stats = worker.recognition_stats
+                worker.recognition_stats = {}
                 parts = []
                 for cid, s in list(stream_threads.items()):
                     fr = s.frames
@@ -1157,9 +1251,23 @@ def main():
                     prev_frames[cid] = fr
                     w = st.get(cid, {"seen": 0, "scanned": 0, "ms": 0.0})
                     avg = w["ms"] / w["scanned"] if w["scanned"] else 0.0
-                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan")
+                    age = w.get("frame_age_ms", 0.0) / w["seen"] if w["seen"] else 0.0
+                    tm = timing.get(cid, {})
+                    detect_avg = tm.get("detect_ms", 0.0) / max(1, tm.get("detects", 0))
+                    embed_avg = tm.get("embed_ms", 0.0) / max(1, tm.get("embeds", 0))
+                    recognized = recognition_stats.get(cid, {})
+                    confirmed_count = recognized.get("count", 0)
+                    confirmation_summary = (
+                        f" | confirmed {confirmed_count} | avg detect-to-confirm {recognized['total_ms'] / confirmed_count:.0f}ms"
+                        if confirmed_count else ""
+                    )
+                    reasons = rejected.get(cid, {})
+                    rejection_summary = (" | rejections " + ",".join(
+                        f"{reason}:{count}" for reason, count in sorted(reasons.items())
+                    )) if reasons else ""
+                    parts.append(f"{cid}: in {fps_in:.1f} fps | scanned {w['scanned'] / dt:.1f}/s of {w['seen'] / dt:.1f}/s | {avg:.0f} ms/scan | {age:.0f} ms frame age | detect {detect_avg:.0f} ms | embed {embed_avg:.0f} ms ({tm.get('embeds', 0)} faces){confirmation_summary}{rejection_summary}")
                 if parts:
-                    print("[STATS] " + "   ||   ".join(parts))
+                    diag("[STATS] " + "   ||   ".join(parts))
 
             # Preview only - recognition happens in the worker thread, so this never blocks on the model
             if SHOW_PREVIEW:
