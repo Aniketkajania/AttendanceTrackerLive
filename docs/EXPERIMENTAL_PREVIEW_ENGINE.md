@@ -1,3 +1,23 @@
+## Standalone laptop test — no SQL Server access
+
+This new mode **does not need SQL Server, employee embeddings, a JWT secret, or the production recognition engine**. It shows **detection only**, not employee names or matching scores. On a device authorized to access the camera stream:
+
+```powershell
+git clone -b feature/camsec-capabilities https://github.com/Aniketkajania/AttendanceTrackerLive.git
+cd AttendanceTrackerLive
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install opencv-python numpy onnxruntime insightface onnx
+.\.venv\Scripts\python.exe experimental_preview_engine.py --rtsp --host 192.168.1.50 --username admin --path Streaming/Channels/101
+```
+
+Substitute the **actual** camera IP, username, RTSP path and port. The script prompts for the camera password without embedding it in command history. An RTSP path is camera-vendor specific; `Streaming/Channels/101` is only a Hikvision-style example, not a guaranteed default. Add `--port 8554` if your camera uses a nonstandard RTSP port.
+
+The first run may download the InsightFace `buffalo_s` detector pack to the local user's model cache; the workstation must have access to that model or have its files installed locally. InsightFace packages may need Windows build tools if pip cannot install them as wheels. You must be connected to the authorized camera network, and your workplace must permit using that stream on the test computer. Don't copy credentials or employee biometric data into the repository.
+
+The standalone preview displays `preview age` (camera image age) separately from `scan` (detector processing time), and uses a reader thread so inference doesn't pause capture. **It does not identify people** or compare against enrolled employees because there is no DB/gallery. Press Q to stop. No pictures, video, or SQL writes are stored.
+
+---
+
 # Experimental preview engine (no attendance writes)
 
 This is a **separate test entrypoint**: `experimental_preview_engine.py`. It is **not** used by `AttendanceTrackerEngine` (NSSM), FastAPI, or IIS. It reads active camera configuration and existing enrollment vectors using **SQL SELECT** only, and never writes attendance logs, alters the current engine, saves video/images, or sends messages.
