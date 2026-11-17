@@ -12,8 +12,6 @@ import cv2
 import numpy as np
 
 import face_pipeline as fp
-from db import query
-from server_engine import build_face_app, build_camera_source
 
 # Isolated experimental settings. No changes to production engine globals.
 MIN_PX = 20
@@ -25,6 +23,8 @@ RECHECK_SEC = 0.75
 
 
 def sources(camera_id):
+    from db import query
+    from server_engine import build_camera_source
     rows = query("SELECT * FROM cameras WHERE camera_id=? AND is_active=1", (camera_id,))
     if not rows:
         raise RuntimeError("Camera not found or inactive: " + camera_id)
@@ -32,6 +32,7 @@ def sources(camera_id):
 
 
 def gallery():
+    from db import query
     users = []
     for row in query("SELECT person_name,face_embedding FROM users WHERE is_active=1"):
         try:
@@ -62,6 +63,10 @@ def assess(frame, detection):
 
 
 def run(args):
+    if args.rtsp:
+        from experimental_rtsp_preview import run_rtsp
+        return run_rtsp(args)
+    from server_engine import build_face_app
     # Read-only DB calls; never import an attendance writer or call event handlers.
     source = args.video if args.video else sources(args.camera)
     people, vectors = ([], np.empty((0, 512), np.float32)) if args.detect_only else gallery()
@@ -164,5 +169,19 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--camera", help="Active camera ID, e.g. HO_IN")
     group.add_argument("--video", help="Local consented test video")
+    group.add_argument("--rtsp", action="store_true", help="Standalone RTSP detection: no SQL or employee records")
     parser.add_argument("--detect-only", action="store_true", help="Detect faces without identity matching")
-    run(parser.parse_args())
+    parser.add_argument("--host", help="RTSP camera IP or hostname (used with --rtsp)")
+    parser.add_argument("--port", type=int, default=554, help="RTSP port")
+    parser.add_argument("--path", default="Streaming/Channels/101", help="Camera RTSP path, without leading slash")
+    parser.add_argument("--username", default="", help="RTSP login (password prompted securely)")
+    args = parser.parse_args()
+    if args.rtsp and not args.host:
+        parser.error("--rtsp requires --host CAMERA_IP")
+    if args.rtsp and (not 1 <= args.port <= 65535):
+        parser.error("--port must be between 1 and 65535")
+    if args.rtsp and args.detect_only:
+        parser.error("--rtsp is already detection-only; omit --detect-only")
+    run(args)
+    raise SystemExit(0)
+
